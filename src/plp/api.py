@@ -328,15 +328,41 @@ def infer() -> InferBuilder:
 # ============================================================
 
 
+def _parse_judge_response(response: str) -> str:
+    """
+    Parse LLM response to extract judge verdict.
+
+    Tries multiple heuristics to extract "a", "b", or "tie" from response.
+
+    Args:
+        response: LLM response string
+
+    Returns:
+        "a", "b", or "tie"
+    """
+    lower = response.lower()
+
+    # Check for explicit mentions
+    if "a" in lower and "b" not in lower:
+        return "a"
+    if "b" in lower and "a" not in lower:
+        return "b"
+
+    # Check for strict start
+    stripped = response.strip().lower()
+    if stripped.startswith("a"):
+        return "a"
+    if stripped.startswith("b"):
+        return "b"
+
+    return "tie"
+
+
 def _default_judge(a: str, b: str) -> str:
     """Default LLM-based judge."""
     prompt = f"Compare these two options:\nA: {a}\nB: {b}\n\nWhich is better? Reply 'A' or 'B'."
     resp = sample(prompt, temperature=0.1)
-    if "A" in resp and "B" not in resp:
-        return "a"
-    if "B" in resp and "A" not in resp:
-        return "b"
-    return "tie"
+    return _parse_judge_response(resp)
 
 
 def _create_llm_judge(template: str) -> Callable[[str, str], str]:
@@ -345,17 +371,6 @@ def _create_llm_judge(template: str) -> Callable[[str, str], str]:
     def judge(a: str, b: str) -> str:
         prompt = template.format(a=a, b=b)
         resp = sample(prompt, temperature=0.1)
-        # Simple heuristic parsing
-        lower = resp.lower()
-        if "a" in lower and "b" not in lower:
-            return "a"
-        if "b" in lower and "a" not in lower:
-            return "b"
-        # If both or neither, try to parse strict start
-        if resp.strip().lower().startswith("a"):
-            return "a"
-        if resp.strip().lower().startswith("b"):
-            return "b"
-        return "tie"
+        return _parse_judge_response(resp)
 
     return judge

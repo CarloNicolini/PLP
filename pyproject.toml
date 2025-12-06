@@ -1,0 +1,17 @@
+[project]
+name = "plp"
+version = "0.1.0"
+description = "Probabilistic Language Programming"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain-openai>=1.1.0",
+    "python-dotenv>=1.2.1",
+    "typer>=0.20.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.1",
+    "pytest-asyncio>=1.3.0",
+]

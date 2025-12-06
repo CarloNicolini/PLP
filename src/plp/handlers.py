@@ -7,10 +7,12 @@ Inspired by Pyro's effect handlers.
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable, Any, Iterator
+from typing import Callable, Any, Iterator, TypeVar
 from functools import wraps
 
 from .state import PLPState, TraceEvent
+
+T = TypeVar("T", bound="HandlerContext")
 
 
 @dataclass
@@ -19,6 +21,43 @@ class HandlerContext:
 
     name: str
     active: bool = True
+
+
+# ============================================================
+# Generic Handler Context Manager Factory
+# ============================================================
+
+_handler_stack: dict[str, Any] = {}
+
+
+def _push_handler(handler_type: str, context: T) -> T:
+    """Push a handler context onto the stack."""
+    _handler_stack[handler_type] = context
+    return context
+
+
+def _pop_handler(handler_type: str) -> Any:
+    """Pop a handler context from the stack."""
+    return _handler_stack.pop(handler_type, None)
+
+
+def _get_handler(handler_type: str) -> Any:
+    """Get the active handler context, if any."""
+    return _handler_stack.get(handler_type)
+
+
+@contextmanager
+def _generic_handler(handler_type: str, context: T) -> Iterator[T]:
+    """Generic context manager for handler contexts."""
+    old_context = _get_handler(handler_type)
+    _push_handler(handler_type, context)
+    try:
+        yield context
+    finally:
+        if old_context is not None:
+            _push_handler(handler_type, old_context)
+        else:
+            _pop_handler(handler_type)
 
 
 # ============================================================
@@ -46,12 +85,9 @@ class ReplayContext(HandlerContext):
         return self.site_outputs.get(site_name)
 
 
-_replay_context: ReplayContext | None = None
-
-
 def get_replay_context() -> ReplayContext | None:
     """Get the active replay context, if any."""
-    return _replay_context
+    return _get_handler("replay")
 
 
 @contextmanager
@@ -78,8 +114,6 @@ def replay(trace: list[TraceEvent]) -> Iterator[ReplayContext]:
         ...     state2, out2 = my_model(PLPState())
         ...     print(f"Replayed {r.replay_count} sites")
     """
-    global _replay_context
-
     # Build site_outputs map from trace
     site_outputs = {}
     for event in trace:
@@ -88,12 +122,8 @@ def replay(trace: list[TraceEvent]) -> Iterator[ReplayContext]:
 
     ctx = ReplayContext(name="replay", trace=trace, site_outputs=site_outputs)
 
-    old_context = _replay_context
-    _replay_context = ctx
-    try:
-        yield ctx
-    finally:
-        _replay_context = old_context
+    with _generic_handler("replay", ctx) as context:
+        yield context
 
 
 # ============================================================
@@ -119,12 +149,9 @@ class BlockContext(HandlerContext):
         return site_name in self.blocked_sites
 
 
-_block_context: BlockContext | None = None
-
-
 def get_block_context() -> BlockContext | None:
     """Get the active block context, if any."""
-    return _block_context
+    return _get_handler("block")
 
 
 @contextmanager
@@ -146,16 +173,10 @@ def block(sites: list[str] | set[str]) -> Iterator[BlockContext]:
         >>> with block(["style_score", "brevity_penalty"]):
         ...     state, out = my_model(PLPState())
     """
-    global _block_context
-
     ctx = BlockContext(name="block", blocked_sites=set(sites))
 
-    old_context = _block_context
-    _block_context = ctx
-    try:
-        yield ctx
-    finally:
-        _block_context = old_context
+    with _generic_handler("block", ctx) as context:
+        yield context
 
 
 # ============================================================
@@ -181,12 +202,9 @@ class DoContext(HandlerContext):
         return self.interventions.get(site_name)
 
 
-_do_context: DoContext | None = None
-
-
 def get_do_context() -> DoContext | None:
     """Get the active do/intervention context, if any."""
-    return _do_context
+    return _get_handler("do")
 
 
 @contextmanager
@@ -210,16 +228,10 @@ def do(interventions: dict[str, str]) -> Iterator[DoContext]:
         ...     state, plan = planning_agent(PLPState())
         ...     # decomposition site will return "Use dynamic programming"
     """
-    global _do_context
-
     ctx = DoContext(name="do", interventions=interventions)
 
-    old_context = _do_context
-    _do_context = ctx
-    try:
-        yield ctx
-    finally:
-        _do_context = old_context
+    with _generic_handler("do", ctx) as context:
+        yield context
 
 
 # ============================================================
@@ -240,12 +252,9 @@ class ConditionContext(HandlerContext):
     condition_count: int = 0
 
 
-_condition_context: ConditionContext | None = None
-
-
 def get_condition_context() -> ConditionContext | None:
     """Get the active condition context, if any."""
-    return _condition_context
+    return _get_handler("condition")
 
 
 @contextmanager
@@ -263,16 +272,10 @@ def condition(observations: dict[str, str]) -> Iterator[ConditionContext]:
     Yields:
         ConditionContext
     """
-    global _condition_context
-
     ctx = ConditionContext(name="condition", observations=observations)
 
-    old_context = _condition_context
-    _condition_context = ctx
-    try:
-        yield ctx
-    finally:
-        _condition_context = old_context
+    with _generic_handler("condition", ctx) as context:
+        yield context
 
 
 # ============================================================

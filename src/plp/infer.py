@@ -110,6 +110,10 @@ class InferEngine:
         Returns:
             Winning candidate string
 
+        Raises:
+            ValueError: If candidates is empty or k <= 0
+            TypeError: If judge_fn is not callable
+
         Example:
             >>> def deterministic_judge(a, b):
             ...     a_sorted = sorted(a.split())
@@ -126,12 +130,18 @@ class InferEngine:
             ...     k=3
             ... )
         """
+        # Validate inputs
+        if not candidates:
+            raise ValueError("No candidates provided")
+        if not callable(judge_fn):
+            raise TypeError(f"judge_fn must be callable, got {type(judge_fn)}")
+        if k <= 0:
+            raise ValueError(f"k must be positive, got {k}")
+
         if rng is None:
             rng = random.Random()
 
         n = len(candidates)
-        if n == 0:
-            raise ValueError("No candidates provided")
         if n == 1:
             return candidates[0]
 
@@ -144,6 +154,13 @@ class InferEngine:
 
             verdict = judge_fn(a, b)
 
+            # Validate judge output
+            if verdict not in ("a", "b", "tie"):
+                raise ValueError(
+                    f"judge_fn must return 'a', 'b', or 'tie', got {verdict!r}"
+                )
+
+            # Update scores based on verdict
             if verdict == "a":
                 scores[i] += 1
                 scores[j] -= 1
@@ -188,9 +205,20 @@ def compute_k_for_eps(p: float, eps: float) -> int:
 
     Returns:
         Minimum k value (as integer, ceiling)
+
+    Raises:
+        ValueError: If p <= 0.5 or eps not in (0, 1)
+        TypeError: If p or eps are not numeric
     """
     import math
 
+    # Type validation
+    if not isinstance(p, (int, float)):
+        raise TypeError(f"p must be numeric, got {type(p)}")
+    if not isinstance(eps, (int, float)):
+        raise TypeError(f"eps must be numeric, got {type(eps)}")
+
+    # Value validation
     if p <= 0.5:
         raise ValueError(f"p must be > 0.5, got {p}")
     if eps <= 0 or eps >= 1:

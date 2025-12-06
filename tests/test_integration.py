@@ -14,7 +14,9 @@ from plp import PLPState, LLMClient, InferEngine, sample, observe, factor, guara
 class TestSortingWithPLP:
     """Integration tests for sorting using PLP primitives."""
 
-    def test_sorting_with_sprt(self, llm: LLMClient, plp_state: PLPState):
+    def test_sorting_with_sprt(
+        self, llm: LLMClient, plp_state: PLPState, judge_factory
+    ):
         """
         Test sorting a list using PLP:
         1. Generate multiple candidate sorted lists via LLM
@@ -46,14 +48,7 @@ class TestSortingWithPLP:
             except ValueError:
                 return False
 
-        def judge(a: str, b: str) -> str:
-            a_ok = is_sorted(a)
-            b_ok = is_sorted(b)
-            if a_ok and not b_ok:
-                return "a"
-            elif b_ok and not a_ok:
-                return "b"
-            return "tie"
+        judge = judge_factory(is_sorted)
 
         # Use SPRT to select best candidate
         winner = InferEngine.sprt_discrete(candidates, judge, k=2)
@@ -63,7 +58,9 @@ class TestSortingWithPLP:
         winner_nums = [int(x) for x in winner.split()]
         assert winner_nums == [1, 2, 3], f"Expected [1, 2, 3], got {winner_nums}"
 
-    def test_sorting_larger_list(self, llm: LLMClient, plp_state: PLPState):
+    def test_sorting_larger_list(
+        self, llm: LLMClient, plp_state: PLPState, judge_factory
+    ):
         """Test sorting a larger list."""
         items_text = "5 2 8 1 9 3"
         original_items = [int(x) for x in items_text.split()]
@@ -91,14 +88,7 @@ class TestSortingWithPLP:
             except ValueError:
                 return False
 
-        def judge(a: str, b: str) -> str:
-            a_ok = is_correct(a)
-            b_ok = is_correct(b)
-            if a_ok and not b_ok:
-                return "a"
-            elif b_ok and not a_ok:
-                return "b"
-            return "tie"
+        judge = judge_factory(is_correct)
 
         winner = InferEngine.sprt_discrete(candidates, judge, k=2)
         winner_nums = [int(x) for x in winner.split()]

@@ -66,7 +66,7 @@ class TestSPRTDiscrete:
 
         assert result1 == result2
 
-    def test_sprt_sorting_correctness(self):
+    def test_sprt_sorting_correctness(self, judge_factory):
         """Test SPRT for selecting correctly sorted list."""
         # Candidates for sorting [3, 1, 2]
         candidates = [
@@ -80,14 +80,7 @@ class TestSPRTDiscrete:
             nums = [int(x) for x in s.split()]
             return nums == sorted(nums)
 
-        def judge(a: str, b: str) -> str:
-            a_ok = is_sorted(a)
-            b_ok = is_sorted(b)
-            if a_ok and not b_ok:
-                return "a"
-            elif b_ok and not a_ok:
-                return "b"
-            return "tie"
+        judge = judge_factory(is_sorted)
 
         result = InferEngine.sprt_discrete(candidates, judge, k=3)
         assert result == "1 2 3"

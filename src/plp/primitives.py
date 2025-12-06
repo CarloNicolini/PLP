@@ -38,6 +38,10 @@ def sample(
         name: Optional name for this primitive (defaults to function name)
         update_state: Optional callback to update state.vars with the output
 
+    Raises:
+        TypeError: If llm is not an LLMClient instance
+        TypeError: If update_state is not callable
+
     Example:
         >>> @sample(llm, name="arithmetic")
         ... def solve_arithmetic(state: PLPState, problem: str) -> str:
@@ -45,6 +49,11 @@ def sample(
         ...
         >>> state, answer = solve_arithmetic(PLPState(), "2+2")
     """
+    # Validate inputs
+    if not isinstance(llm, LLMClient):
+        raise TypeError(f"llm must be an LLMClient instance, got {type(llm)}")
+    if update_state is not None and not callable(update_state):
+        raise TypeError(f"update_state must be callable, got {type(update_state)}")
 
     def decorator(fn: Callable[..., str]):
         prim_name = name or fn.__name__
@@ -177,6 +186,10 @@ def factor(
         scale: Multiplier for the log-factor (default 1.0)
         mask: Optional predicate - if returns False, factor is skipped
 
+    Raises:
+        TypeError: If mask is not callable
+        ValueError: If scale is not a finite number
+
     Example:
         >>> @factor(name="coherence", scale=0.1)
         ... def score_coherence(state: PLPState, text: str) -> float:
@@ -187,6 +200,13 @@ def factor(
         ... def penalize_length(state: PLPState, text: str) -> float:
         ...     return -0.01 * len(text)  # Only active in summary mode
     """
+    # Validate inputs
+    if mask is not None and not callable(mask):
+        raise TypeError(f"mask must be callable, got {type(mask)}")
+    if not isinstance(scale, (int, float)) or not (
+        -float("inf") < scale < float("inf")
+    ):
+        raise ValueError(f"scale must be a finite number, got {scale}")
 
     def decorator(fn: Callable[..., float]):
         fac_name = name or fn.__name__
