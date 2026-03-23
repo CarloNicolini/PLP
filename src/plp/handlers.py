@@ -7,10 +7,9 @@ Inspired by Pyro's effect handlers.
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable, Any, Iterator, TypeVar
-from functools import wraps
+from typing import Any, Iterator, TypeVar
 
-from .state import PLPState, TraceEvent
+from .state import TraceEvent
 
 T = TypeVar("T", bound="HandlerContext")
 

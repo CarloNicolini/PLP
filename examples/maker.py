@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from plp import LLMClient, PLPState, sample, plate_map, compute_k_for_eps
+from plp import ChatOpenAI, PLPState, sample, plate_map, compute_k_for_eps
 
 
 # ============================================================
@@ -46,7 +46,7 @@ DISCRIMINATOR = (
 # ============================================================
 
 
-def make_maker(llm: LLMClient):
+def make_maker(llm: ChatOpenAI):
     """Create MAKER components using PLP sample sites."""
 
     @sample(llm, name="decompose")
@@ -124,13 +124,13 @@ def parse_steps(response: str) -> list[str]:
 
 
 def maker_solve(
-    llm: LLMClient, problem: str, target_reliability: float = 0.95, p: float = 0.7
+    llm: ChatOpenAI, problem: str, target_reliability: float = 0.95, p: float = 0.7
 ) -> str:
     """
     Solve a problem using MAKER algorithm.
 
     Args:
-        llm: LLM client
+        llm: ChatOpenAI instance
         problem: Natural language problem
         target_reliability: Target overall success probability
         p: Estimated per-step accuracy
@@ -169,7 +169,7 @@ def maker_solve(
 # ============================================================
 
 if __name__ == "__main__":
-    llm = LLMClient(model="gpt-4.1-mini", temperature=0.7)
+    llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0.7)
 
     # Single test: 6-digit × 6-digit multiplication
     problem = "What is 847293 × 159468?"

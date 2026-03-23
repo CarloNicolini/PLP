@@ -6,7 +6,7 @@ and text-based prompt snippets that can be tuned.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 import random
 
 
@@ -203,7 +203,7 @@ def param(
 
     Example:
         >>> temperature = param("temperature", 0.7, bounds=(0.1, 1.5))
-        >>> llm = LLMClient(temperature=temperature.get())
+        >>> llm = ChatOpenAI(temperature=temperature.get())
     """
     return _registry.register_param(name, default, bounds, description)
 

@@ -8,13 +8,13 @@ Agents are named black boxes with known input/output interfaces
 that can be composed into larger PLP programs.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Any, Protocol
 from functools import wraps
 import time
 
+from ._llm import LLMLike, invoke_llm
 from .state import PLPState, TraceEvent
-from .client import LLMClient
 
 
 class AgentProtocol(Protocol):
@@ -46,7 +46,7 @@ class AgentSpec:
 
     name: str
     agent_class: type | Callable
-    llm: LLMClient | None = None
+    llm: LLMLike | None = None
     reliability: float = 0.7
     timeout: float | None = None
     description: str = ""
@@ -67,7 +67,7 @@ _agents: dict[str, AgentSpec] = {}
 
 def register_agent(
     name: str,
-    llm: LLMClient | None = None,
+    llm: LLMLike | None = None,
     reliability: float = 0.7,
     timeout: float | None = None,
     description: str = "",
@@ -118,7 +118,7 @@ def get_agent(name: str) -> AgentSpec | None:
     return _agents.get(name)
 
 
-def create_agent(name: str, llm: LLMClient | None = None) -> Any:
+def create_agent(name: str, llm: LLMLike | None = None) -> Any:
     """
     Instantiate a registered agent.
 
@@ -160,7 +160,7 @@ class BaseAgent:
     and reliability tracking.
     """
 
-    def __init__(self, llm: LLMClient | None = None):
+    def __init__(self, llm: LLMLike | None = None):
         self.llm = llm
         self._call_count = 0
         self._total_time = 0.0
@@ -185,7 +185,7 @@ class BaseAgent:
                 spec.call_count += 1
 
             return result
-        except Exception as e:
+        except Exception:
             elapsed = time.time() - start
             self._total_time += elapsed
             raise
@@ -222,7 +222,7 @@ class DecomposerAgent(BaseAgent):
             "List each subtask on a new line, numbered 1., 2., etc."
         )
 
-        response = self.llm.invoke(prompt)
+        response = invoke_llm(self.llm, prompt)
 
         # Parse subtasks
         lines = response.strip().split("\n")
@@ -273,7 +273,7 @@ class AggregatorAgent(BaseAgent):
             "Provide a synthesized answer:"
         )
 
-        response = self.llm.invoke(prompt)
+        response = invoke_llm(self.llm, prompt)
 
         new_state = state.copy()
         new_state.trace.append(
@@ -317,7 +317,7 @@ class CriticAgent(BaseAgent):
             "4. Suggested improvements"
         )
 
-        response = self.llm.invoke(prompt)
+        response = invoke_llm(self.llm, prompt)
 
         # Try to extract score
         score = 5  # default
@@ -368,7 +368,7 @@ class JudgeAgent(BaseAgent):
             "Which is better? Reply with exactly 'A', 'B', or 'TIE'."
         )
 
-        response = self.llm.invoke(prompt).strip().upper()
+        response = invoke_llm(self.llm, prompt).strip().upper()
 
         # Normalize response
         if "A" in response and "B" not in response:
@@ -413,7 +413,7 @@ class JudgeAgent(BaseAgent):
         return judge_fn
 
 
-def agent(name: str, llm: LLMClient | None = None, reliability: float = 0.7):
+def agent(name: str, llm: LLMLike | None = None, reliability: float = 0.7):
     """
     Decorator to create a simple agent from a function.
 

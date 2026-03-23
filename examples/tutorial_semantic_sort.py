@@ -6,7 +6,6 @@ Demonstrates the new high-level PLP API.
 """
 
 import plp
-import os
 from dotenv import load_dotenv
 
 load_dotenv()

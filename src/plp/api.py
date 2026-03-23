@@ -1,18 +1,21 @@
 """
 PLP High-Level API.
 
-Provides a simplified, Pythonic interface for Probabilistic Language Programming.
-Hides the complexity of PLPState and LLMClient for common use cases.
+Provides ergonomic helpers on top of the core primitives:
+- `sample`: one-off prompt using global config or a supplied LLM
+- `sampler`: decorator for global-config-backed sample sites
+- `vote`: SPRT inference shortcut
 """
 
 from typing import Callable, Any, Literal, Optional
 from functools import wraps
 
 from .state import PLPState
-from .client import LLMClient
-from .primitives import sample as _sample_primitive
 from .infer import InferEngine, compute_k_for_eps
-from ._config import get_llm, get_config
+from ._config import get_config
+from ._llm import LLMLike
+from .runtime import run_prompt
+from .session import _resolve_llm
 
 
 # ============================================================
@@ -20,14 +23,17 @@ from ._config import get_llm, get_config
 # ============================================================
 
 
-def sample(
+def prompt(
     prompt: str,
     *,
     system: Optional[str] = None,
     temperature: Optional[float] = None,
     model: Optional[str] = None,
-    **kwargs,
-) -> str:
+    llm: LLMLike | None = None,
+    name: Optional[str] = None,
+    return_state: bool = False,
+    **llm_kwargs,
+) -> str | tuple[str, PLPState]:
     """
     One-liner LLM sampling using global configuration.
 
@@ -36,42 +42,51 @@ def sample(
         system: Optional system prompt (overrides global default)
         temperature: Optional temperature override
         model: Optional model override
-        **kwargs: Additional arguments passed to LLM
+        llm: Optional explicit LLM client
+        name: Optional trace site name (defaults to "plp.prompt")
+        return_state: If True, also return the PLPState after sampling
+        llm_kwargs: Additional args forwarded to ChatOpenAI
 
     Returns:
-        Generated text response
+        Generated text response (and optionally the PLPState)
 
     Example:
         >>> import plp
         >>> plp.configure(model="gpt-4.1-mini")
-        >>> answer = plp.sample("What is 2+2?")
+        >>> answer = plp.prompt("What is 2+2?")
     """
-    # Get configuration
+    state = PLPState()
+    llm_client = _resolve_llm(
+        llm,
+        model=model,
+        temperature=temperature,
+        **llm_kwargs,
+    )
     config = get_config()
     sys_prompt = system if system is not None else config.system_prompt
+    site_name = name or "plp.prompt"
 
-    # Get LLM instance
-    client_kwargs = {
-        "model": model if model is not None else config.model,
-        "temperature": temperature if temperature is not None else config.temperature,
-        "base_url": config.base_url,
-        **config.additional_kwargs,
-        **kwargs,
-    }
-
-    if config.api_key is not None:
-        client_kwargs["api_key"] = config.api_key
-
-    llm_client = LLMClient(**client_kwargs)
-
-    return llm_client.invoke(prompt, system_prompt=sys_prompt)
+    new_state, output = run_prompt(
+        llm_client,
+        state,
+        name=site_name,
+        prompt=prompt,
+        system_prompt=sys_prompt,
+    )
+    if return_state:
+        return output, new_state
+    return output
 
 
 def sampler(
     name: Optional[str] = None,
     system: Optional[str] = None,
-    update_vars: Optional[dict[str, str]] = None,
-):
+    *,
+    llm: LLMLike | None = None,
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    **llm_kwargs,
+) -> Callable[[Callable[..., str]], Callable[..., str]]:
     """
     Decorator for sample sites that hides PLPState.
 
@@ -81,7 +96,10 @@ def sampler(
     Args:
         name: Name of the sample site (defaults to function name)
         system: Optional system prompt for this site
-        update_vars: Optional dict to map output to state variables
+        llm: Optional explicit LLM client
+        model: Optional model override (when no llm supplied)
+        temperature: Optional temperature override
+        llm_kwargs: Additional ChatOpenAI kwargs
 
     Example:
         >>> @plp.sampler(name="solver")
@@ -96,66 +114,38 @@ def sampler(
 
         @wraps(fn)
         def wrapper(*args, **kwargs):
-            # Check if called with return_state=True
             return_state = kwargs.pop("return_state", False)
 
-            # Check if state is passed explicitly as first arg
-            # This allows mixing high-level and low-level styles
             if args and isinstance(args[0], PLPState):
                 state = args[0]
-                fn_args = args[1:]
+                call_args = args[1:]
             else:
                 state = PLPState()
-                fn_args = args
+                call_args = args
 
-            # Get LLM from global config
-            # We create a new client for each call to respect current config
-            # but get_llm caches the underlying ChatOpenAI instance
+            prompt = fn(*call_args, **kwargs)
+
+            if not isinstance(prompt, str):
+                raise TypeError(
+                    f"@sampler functions must return a string prompt, got {type(prompt)}"
+                )
+
+            llm_client = _resolve_llm(
+                llm,
+                model=model,
+                temperature=temperature,
+                **llm_kwargs,
+            )
             config = get_config()
             sys_prompt = system if system is not None else config.system_prompt
 
-            # Create a temporary client wrapper that uses our cached LLM
-            client_kwargs = {
-                "model": config.model,
-                "temperature": config.temperature,
-                "base_url": config.base_url,
-                **config.additional_kwargs,
-            }
-            if config.api_key is not None:
-                client_kwargs["api_key"] = config.api_key
-
-            llm = LLMClient(**client_kwargs)
-
-            # Define the prompt generator
-            def prompt_gen(s: PLPState, *a, **k) -> str:
-                # If system prompt is set, we prepend it to the prompt
-                # This is a bit of a hack since low-level sample doesn't support system prompt natively yet
-                # ideally we'd pass it to invoke, but the primitive calls invoke(prompt)
-                # So we bake it into the prompt or rely on the client update
-                p = fn(*a, **k)
-                # We can't easily pass system prompt to the primitive's invoke call
-                # without changing primitives.py.
-                # For now, let's assume the user handles system prompt in the prompt
-                # OR we update LLMClient to handle it if we could pass it.
-                return p
-
-            # Use the low-level primitive
-            # We need to monkey-patch the client's invoke if we want system prompt support
-            # inside the primitive without changing primitive signature
-            if sys_prompt:
-                original_invoke = llm.invoke
-                llm.invoke = lambda p: original_invoke(p, system_prompt=sys_prompt)
-
-            # Create the primitive
-            prim = _sample_primitive(llm, name=site_name)(prompt_gen)
-
-            # Execute
-            new_state, output = prim(state, *fn_args, **kwargs)
-
-            # Update vars if requested
-            if update_vars:
-                # TODO: Implement var updates
-                pass
+            new_state, output = run_prompt(
+                llm_client,
+                state,
+                name=site_name,
+                prompt=prompt,
+                system_prompt=sys_prompt,
+            )
 
             if return_state:
                 return output, new_state
@@ -360,8 +350,8 @@ def _parse_judge_response(response: str) -> str:
 
 def _default_judge(a: str, b: str) -> str:
     """Default LLM-based judge."""
-    prompt = f"Compare these two options:\nA: {a}\nB: {b}\n\nWhich is better? Reply 'A' or 'B'."
-    resp = sample(prompt, temperature=0.1)
+    message = f"Compare these two options:\nA: {a}\nB: {b}\n\nWhich is better? Reply 'A' or 'B'."
+    resp = prompt(message, temperature=0.1)
     return _parse_judge_response(resp)
 
 
@@ -369,8 +359,8 @@ def _create_llm_judge(template: str) -> Callable[[str, str], str]:
     """Create a judge function from a prompt template."""
 
     def judge(a: str, b: str) -> str:
-        prompt = template.format(a=a, b=b)
-        resp = sample(prompt, temperature=0.1)
+        message = template.format(a=a, b=b)
+        resp = prompt(message, temperature=0.1)
         return _parse_judge_response(resp)
 
     return judge

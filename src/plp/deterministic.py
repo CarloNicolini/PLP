@@ -163,7 +163,7 @@ def canonicalize(
     new_state.trace.append(
         TraceEvent(
             primitive="canonicalize",
-            prompt=f"(deterministic canonicalize)",
+            prompt="(deterministic canonicalize)",
             output=result,
             meta={"deterministic": True, "strip": strip, "lowercase": lowercase},
         )

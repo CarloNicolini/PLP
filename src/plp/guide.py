@@ -8,12 +8,12 @@ A guide provides an importance proposal distribution that can make sampling
 more efficient for hard subproblems.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Any
 from functools import wraps
 
+from ._llm import LLMLike, invoke_llm
 from .state import PLPState, TraceEvent
-from .client import LLMClient
 
 
 @dataclass
@@ -32,7 +32,7 @@ class GuideSpec:
     name: str
     model_name: str
     guide_fn: Callable[..., tuple[PLPState, Any]]
-    llm: LLMClient | None = None
+    llm: LLMLike | None = None
     weight: float = 1.0
 
 
@@ -43,7 +43,7 @@ _guides: dict[str, GuideSpec] = {}
 def register_guide(
     model_name: str,
     name: str | None = None,
-    llm: LLMClient | None = None,
+    llm: LLMLike | None = None,
     weight: float = 1.0,
 ):
     """
@@ -109,7 +109,7 @@ class GuidedSampler:
     - Returns weighted samples for inference
     """
 
-    def __init__(self, model_llm: LLMClient, guide_llm: LLMClient | None = None):
+    def __init__(self, model_llm: LLMLike, guide_llm: LLMLike | None = None):
         """
         Initialize guided sampler.
 
@@ -193,7 +193,7 @@ class GuidedSampler:
 
 
 def guide(
-    for_model: str, llm: LLMClient | None = None, temperature: float | None = None
+    for_model: str, llm: LLMLike | None = None, temperature: float | None = None
 ):
     """
     Decorator to create a guide for a specific model sample site.
@@ -267,7 +267,7 @@ class MetaGuide:
     proposals lead to successful outcomes and adapts.
     """
 
-    def __init__(self, llm: LLMClient):
+    def __init__(self, llm: LLMLike):
         self.llm = llm
         self.success_history: list[
             tuple[str, str, bool]
@@ -299,7 +299,7 @@ class MetaGuide:
             model_name, f"Propose a solution for: {task}"
         )
 
-        response = self.llm.invoke(improved_prompt)
+        response = invoke_llm(self.llm, improved_prompt)
 
         new_state = state.copy()
         new_state.trace.append(

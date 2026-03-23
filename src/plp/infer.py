@@ -4,13 +4,22 @@ PLP Inference Engines.
 Provides inference algorithms for PLP:
 - run_map: Naive MAP by multiple runs
 - sprt_discrete: First-to-ahead-by-k voting over candidate strings
+
+TextGrad connection:
+- TextGrad (Yuksekgonul et al., 2024) frames textual gradients as the
+  optimization primitive for compound AI systems.
+- PLP treats those same textual gradients as *signals* that can be fed into
+  broader inference loops. `SVGDEngine` exposes Stein-style updates whose
+  drive functions are often implemented with `textgrad_step`, while
+  `sprt_discrete` lets textual judges vote over candidates produced by
+  text-first sites.
 """
 
 import random
-from typing import Callable, Any
+from dataclasses import dataclass
+from typing import Callable, Any, Sequence
 
 from .state import PLPState
-from .client import LLMClient
 
 
 class InferEngine:
@@ -20,20 +29,7 @@ class InferEngine:
     These algorithms approximate MAP or posterior solutions by:
     - Running the model multiple times (run_map)
     - Voting among discrete candidates (sprt_discrete)
-
-    Example:
-        >>> engine = InferEngine(llm)
-        >>> best_state, best_output = engine.run_map(model_fn, initial_state, runs=5)
     """
-
-    def __init__(self, llm: LLMClient):
-        """
-        Initialize the inference engine.
-
-        Args:
-            llm: LLM client to use for any inference-time LLM calls
-        """
-        self.llm = llm
 
     def run_map(
         self,
@@ -180,6 +176,156 @@ class InferEngine:
         # Max rounds reached, return current leader
         best_idx = max(range(n), key=lambda t: scores[t])
         return candidates[best_idx]
+
+
+@dataclass
+class SVGDParticle:
+    """
+    Container for a single SVGD particle.
+
+    Attributes:
+        value: User-defined payload (e.g., prompt string, dict of fields, etc.).
+        state: The PLPState associated with this particle. Each step clones and
+            updates the state so gradient calculations remain traceable.
+    """
+
+    value: Any
+    state: PLPState
+
+
+DriveFn = Callable[
+    [SVGDParticle, int], tuple[SVGDParticle, Any, dict[str, Any]]
+]
+RepulsionFn = Callable[
+    [SVGDParticle, Sequence[SVGDParticle], int],
+    tuple[SVGDParticle, Any, dict[str, Any]],
+]
+UpdateFn = Callable[
+    [
+        SVGDParticle,
+        Any,
+        Any,
+        dict[str, Any],
+        dict[str, Any],
+        float,
+        int,
+    ],
+    tuple[SVGDParticle, dict[str, Any]],
+]
+
+
+class SVGDEngine:
+    """
+    Generic Stein Variational Gradient Descent (SVGD) driver.
+
+    Users supply three callables:
+        - drive_fn:     Computes the TextGrad-style "drive" force (∇ log p).
+        - repulsion_fn: Computes the kernel repulsion term given all particles.
+        - update_fn:    Applies both forces to produce the refined particle.
+
+    Each callable receives and returns SVGDParticle instances so PLP states and
+    traces remain accessible (allowing factor/sample primitives inside).
+    In practice, the drive_fn is often implemented with `textgrad_step` or a
+    related textual gradient oracle, making this class the bridge between the
+    TextGrad computation-graph metaphor and probabilistic inference kernels.
+    The repulsion_fn can likewise query `text_kernel_constraint` or overlap
+    judges to express SVGD's kernel forces in natural language.
+    """
+
+    def __init__(self, diversity_force: float = 0.7):
+        if diversity_force < 0:
+            raise ValueError(
+                f"diversity_force must be non-negative, got {diversity_force}"
+            )
+        self.diversity_force = diversity_force
+
+    def step(
+        self,
+        particles: Sequence[SVGDParticle],
+        drive_fn: DriveFn,
+        repulsion_fn: RepulsionFn,
+        update_fn: UpdateFn,
+    ) -> tuple[list[SVGDParticle], list[dict[str, Any]]]:
+        """
+        Run a single SVGD sweep over the particles.
+
+        Args:
+            particles: Current list/tuple of SVGDParticle objects.
+            drive_fn: Callable returning (particle, drive_signal, metadata).
+            repulsion_fn: Callable returning (particle, repulsion_signal, metadata).
+            update_fn: Callable applying both signals and returning
+                (updated_particle, diagnostics).
+
+        Returns:
+            Tuple (new_particles, diagnostics_per_particle).
+        """
+        new_particles: list[SVGDParticle] = []
+        diagnostics: list[dict[str, Any]] = []
+
+        base_particles = list(particles)
+        if not base_particles:
+            return new_particles, diagnostics
+
+        for idx, particle in enumerate(base_particles):
+            working_state = particle.state.copy()
+            working_particle = SVGDParticle(value=particle.value, state=working_state)
+
+            working_particle, drive_signal, drive_meta = drive_fn(
+                working_particle, idx
+            )
+            working_particle, repulsion_signal, repulsion_meta = repulsion_fn(
+                working_particle, base_particles, idx
+            )
+
+            updated_particle, update_meta = update_fn(
+                working_particle,
+                drive_signal,
+                repulsion_signal,
+                drive_meta,
+                repulsion_meta,
+                self.diversity_force,
+                idx,
+            )
+            new_particles.append(updated_particle)
+
+            diag = {
+                "index": idx,
+                "drive": drive_meta,
+                "repulsion": repulsion_meta,
+                "update": update_meta,
+            }
+            diagnostics.append(diag)
+
+        return new_particles, diagnostics
+
+    def run(
+        self,
+        particles: Sequence[SVGDParticle],
+        drive_fn: DriveFn,
+        repulsion_fn: RepulsionFn,
+        update_fn: UpdateFn,
+        iterations: int,
+    ) -> tuple[list[SVGDParticle], list[list[dict[str, Any]]]]:
+        """
+        Convenience helper to run multiple SVGD iterations.
+
+        Returns:
+            (final_particles, diagnostics_history) where diagnostics_history
+            is a list with one diagnostics entry per iteration.
+        """
+        if iterations <= 0:
+            raise ValueError(f"iterations must be positive, got {iterations}")
+
+        current = list(particles)
+        history: list[list[dict[str, Any]]] = []
+
+        for _ in range(iterations):
+            current, diagnostics = self.step(
+                current, drive_fn=drive_fn, repulsion_fn=repulsion_fn, update_fn=update_fn
+            )
+            history.append(diagnostics)
+
+        return current, history
 
 
 def compute_k_for_eps(p: float, eps: float) -> int:

@@ -10,14 +10,16 @@ Decorators for the fundamental PLP operations:
 from typing import Callable
 from functools import wraps
 
+from ._llm import LLMLike
+from .runtime import ensure_llm, run_prompt
 from .state import PLPState, TraceEvent
-from .client import LLMClient
 
 
 def sample(
-    llm: LLMClient,
+    llm: LLMLike,
     name: str | None = None,
     update_state: Callable[[PLPState, str], None] | None = None,
+    system_prompt: str | None = None,
 ):
     """
     Decorator for LLM-based sample primitives.
@@ -39,7 +41,7 @@ def sample(
         update_state: Optional callback to update state.vars with the output
 
     Raises:
-        TypeError: If llm is not an LLMClient instance
+        TypeError: If llm does not provide an 'invoke' method
         TypeError: If update_state is not callable
 
     Example:
@@ -49,9 +51,7 @@ def sample(
         ...
         >>> state, answer = solve_arithmetic(PLPState(), "2+2")
     """
-    # Validate inputs
-    if not isinstance(llm, LLMClient):
-        raise TypeError(f"llm must be an LLMClient instance, got {type(llm)}")
+    ensure_llm(llm)
     if update_state is not None and not callable(update_state):
         raise TypeError(f"update_state must be callable, got {type(update_state)}")
 
@@ -60,34 +60,18 @@ def sample(
 
         @wraps(fn)
         def wrapped(state: PLPState, *args, **kwargs) -> tuple[PLPState, str]:
-            # Check for active handlers
-            from .handlers import check_handlers
-
-            cached_output, handler_used = check_handlers(prim_name)
-
             prompt = fn(state, *args, **kwargs)
+            new_state, output = run_prompt(
+                llm,
+                state,
+                name=prim_name,
+                prompt=prompt,
+                system_prompt=system_prompt,
+            )
 
-            if cached_output is not None:
-                # Handler provided output, skip LLM call
-                output = cached_output
-            else:
-                # Normal LLM call
-                output = llm.invoke(prompt)
-
-            new_state = state.copy()
             if update_state is not None:
                 update_state(new_state, output)
 
-            event = TraceEvent(
-                primitive=prim_name,
-                prompt=prompt,
-                output=output,
-                meta={
-                    "llm": llm.name,
-                    "handler": handler_used if handler_used != "none" else None,
-                },
-            )
-            new_state.trace.append(event)
             return new_state, output
 
         return wrapped

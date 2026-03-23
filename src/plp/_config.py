@@ -9,7 +9,6 @@ Manages global settings for the PLP library, including:
 Provides context managers for scoped configuration overrides.
 """
 
-import os
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from typing import Iterator, Optional
@@ -163,7 +162,7 @@ def model(
 
     Example:
         >>> with plp.model("gpt-4o", temperature=0.2):
-        ...     plp.sample("Generate code")
+        ...     plp.prompt("Generate code")
     """
     global _config
     original_config = PLPConfig(

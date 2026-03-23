@@ -8,12 +8,25 @@ Usage:
     with plp.plate("candidates", 5) as indices:
         for i in indices:
             state, candidate = propose_solution(state, problem)
+
+Concurrency:
+    The global ``_plate_stack`` is not safe for concurrent *entry/exit* of
+    ``plate()`` / ``plate_stack()`` from multiple threads. Parallel helpers
+    (threaded: ``vectorized_sample(..., max_workers=...)``, ``plate_map(...)``;
+    async: ``avectorized_sample(...)``, ``plate_amap(...)``) run the per-index
+    body concurrently while a single plate context is active on the spawning
+    thread/task; that pattern is intended for I/O-bound work (e.g. LLM calls).
+    Do not nest new ``plate()`` contexts inside worker threads unless you
+    serialize those sections.
 """
 
+from __future__ import annotations
+
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable, Any, Iterator
-import asyncio
+from typing import Callable, Any, Awaitable, Iterator
 
 from .state import PLPState, TraceEvent
 
@@ -134,6 +147,8 @@ def vectorized_sample(
     sample_fn: Callable[[PLPState, int], tuple[PLPState, Any]],
     init_state: PLPState,
     plate_ctx: PlateContext,
+    *,
+    max_workers: int | None = None,
 ) -> tuple[list[PLPState], list[Any]]:
     """
     Run sample_fn for each index in the plate.
@@ -144,16 +159,86 @@ def vectorized_sample(
         sample_fn: Function taking (state, index) returning (state, output)
         init_state: Initial state (copied for each run)
         plate_ctx: Active plate context
+        max_workers: If > 1, run each index in a thread pool (order of results
+            matches ``plate_ctx.indices``). Use for I/O-bound ``sample_fn`` (e.g.
+            remote LLM calls). ``None`` or ``1`` keeps the original sequential
+            loop.
 
     Returns:
         Tuple of (list of states, list of outputs)
     """
-    states = []
-    outputs = []
+    indices = list(plate_ctx.indices)
 
-    for i in plate_ctx:
+    def run_one(i: int) -> tuple[PLPState, Any]:
         state_copy = init_state.copy()
-        final_state, output = sample_fn(state_copy, i)
+        return sample_fn(state_copy, i)
+
+    if max_workers is None or max_workers <= 1:
+        states: list[PLPState] = []
+        outputs: list[Any] = []
+        for i in indices:
+            final_state, output = run_one(i)
+            states.append(final_state)
+            outputs.append(output)
+            plate_ctx.add_result(final_state, output)
+        return states, outputs
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        results = list(pool.map(run_one, indices))
+
+    states = [s for s, _ in results]
+    outputs = [o for _, o in results]
+    for fs, out in zip(states, outputs):
+        plate_ctx.add_result(fs, out)
+
+    return states, outputs
+
+
+async def avectorized_sample(
+    sample_fn: Callable[[PLPState, int], Awaitable[tuple[PLPState, Any]]],
+    init_state: PLPState,
+    plate_ctx: PlateContext,
+    *,
+    max_concurrency: int | None = None,
+) -> tuple[list[PLPState], list[Any]]:
+    """
+    Async variant of :func:`vectorized_sample`.
+
+    Args:
+        sample_fn: Async function taking (state, index) and returning
+            (state, output).
+        init_state: Initial state (copied for each run).
+        plate_ctx: Active plate context.
+        max_concurrency: Maximum number of in-flight tasks. ``None`` means no
+            explicit cap other than the plate size.
+
+    Returns:
+        Tuple of (list of states, list of outputs) ordered by ``plate_ctx.indices``.
+    """
+    indices = list(plate_ctx.indices)
+    if not indices:
+        return [], []
+
+    if max_concurrency is not None and max_concurrency <= 0:
+        raise ValueError("max_concurrency must be > 0 when provided")
+
+    limit = max_concurrency if max_concurrency is not None else len(indices)
+    semaphore = asyncio.Semaphore(limit)
+    results: list[tuple[PLPState, Any] | None] = [None] * len(indices)
+
+    async def run_one(pos: int, i: int) -> None:
+        async with semaphore:
+            state_copy = init_state.copy()
+            results[pos] = await sample_fn(state_copy, i)
+
+    await asyncio.gather(*(run_one(pos, i) for pos, i in enumerate(indices)))
+
+    states: list[PLPState] = []
+    outputs: list[Any] = []
+    for result in results:
+        if result is None:
+            raise RuntimeError("Missing async plate result")
+        final_state, output = result
         states.append(final_state)
         outputs.append(output)
         plate_ctx.add_result(final_state, output)
@@ -171,6 +256,8 @@ def plate_map(
     size: int,
     fn: Callable[[PLPState], tuple[PLPState, Any]],
     init_state: PLPState | None = None,
+    *,
+    max_workers: int | None = None,
 ) -> tuple[list[PLPState], list[Any]]:
     """
     Run a function N times independently, collecting results.
@@ -182,6 +269,8 @@ def plate_map(
         size: Number of independent runs
         fn: Function taking state and returning (new_state, output)
         init_state: Initial state (defaults to fresh PLPState)
+        max_workers: If > 1, run iterations concurrently via a thread pool
+            (output order matches plate indices). Intended for I/O-bound ``fn``.
 
     Returns:
         Tuple of (list of final states, list of outputs)
@@ -192,62 +281,29 @@ def plate_map(
     if init_state is None:
         init_state = PLPState()
 
-    states = []
-    outputs = []
+    states: list[PLPState] = []
+    outputs: list[Any] = []
 
     with plate(name, size) as p:
-        for _ in p:
-            state_copy = init_state.copy()
-            final_state, output = fn(state_copy)
-            states.append(final_state)
-            outputs.append(output)
-            p.add_result(final_state, output)
+        if max_workers is None or max_workers <= 1:
+            for _ in p:
+                state_copy = init_state.copy()
+                final_state, output = fn(state_copy)
+                states.append(final_state)
+                outputs.append(output)
+                p.add_result(final_state, output)
+        else:
 
-    return states, outputs
+            def run_one(_i: int) -> tuple[PLPState, Any]:
+                state_copy = init_state.copy()
+                return fn(state_copy)
 
-
-async def aplate_map(
-    name: str,
-    size: int,
-    fn: Callable[[PLPState], tuple[PLPState, Any]],
-    init_state: PLPState | None = None,
-    max_concurrent: int | None = None,
-) -> tuple[list[PLPState], list[Any]]:
-    """
-    Async version of plate_map - runs fn N times with optional concurrency.
-
-    Args:
-        name: Identifier for this plate
-        size: Number of independent runs
-        fn: Async function taking state and returning (new_state, output)
-        init_state: Initial state (defaults to fresh PLPState)
-        max_concurrent: Maximum concurrent executions (None = all at once)
-
-    Returns:
-        Tuple of (list of final states, list of outputs)
-    """
-    if init_state is None:
-        init_state = PLPState()
-
-    if max_concurrent is None:
-        max_concurrent = size
-
-    semaphore = asyncio.Semaphore(max_concurrent)
-
-    async def run_one(idx: int) -> tuple[int, PLPState, Any]:
-        async with semaphore:
-            state_copy = init_state.copy()
-            final_state, output = await fn(state_copy)
-            return idx, final_state, output
-
-    tasks = [run_one(i) for i in range(size)]
-    results = await asyncio.gather(*tasks)
-
-    # Sort by index to maintain order
-    results.sort(key=lambda x: x[0])
-
-    states = [r[1] for r in results]
-    outputs = [r[2] for r in results]
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                results = list(pool.map(run_one, p.indices))
+            for final_state, output in results:
+                states.append(final_state)
+                outputs.append(output)
+                p.add_result(final_state, output)
 
     return states, outputs
 
@@ -258,6 +314,8 @@ def plate_reduce(
     fn: Callable[[PLPState], tuple[PLPState, Any]],
     reducer: Callable[[list[Any]], Any],
     init_state: PLPState | None = None,
+    *,
+    max_workers: int | None = None,
 ) -> tuple[PLPState, Any]:
     """
     Run fn N times and reduce the outputs to a single result.
@@ -270,6 +328,7 @@ def plate_reduce(
         fn: Function taking state and returning (new_state, output)
         reducer: Function to combine N outputs into one
         init_state: Initial state
+        max_workers: Passed to :func:`plate_map` for parallel runs.
 
     Returns:
         Tuple of (combined state with plate event, reduced output)
@@ -281,7 +340,7 @@ def plate_reduce(
         ...     reducer=lambda outs: max(set(outs), key=outs.count)
         ... )
     """
-    states, outputs = plate_map(name, size, fn, init_state)
+    states, outputs = plate_map(name, size, fn, init_state, max_workers=max_workers)
 
     reduced = reducer(outputs)
 
@@ -290,6 +349,90 @@ def plate_reduce(
     combined_state.trace.append(
         TraceEvent(
             primitive=f"plate_reduce({name})",
+            prompt=f"(plate: {size} runs)",
+            output=str(reduced),
+            meta={"plate_name": name, "plate_size": size, "all_outputs": outputs},
+        )
+    )
+
+    return combined_state, reduced
+
+
+async def plate_amap(
+    name: str,
+    size: int,
+    fn: Callable[[PLPState], Awaitable[tuple[PLPState, Any]]],
+    init_state: PLPState | None = None,
+    *,
+    max_concurrency: int | None = None,
+) -> tuple[list[PLPState], list[Any]]:
+    """
+    Async variant of :func:`plate_map` for concurrent async LLM calls.
+
+    Args:
+        name: Identifier for this plate.
+        size: Number of independent runs.
+        fn: Async function taking a state and returning (new_state, output).
+        init_state: Initial state (defaults to fresh PLPState).
+        max_concurrency: Maximum number of in-flight tasks. ``None`` means no
+            explicit cap other than the plate size.
+
+    Returns:
+        Tuple of (list of final states, list of outputs), in index order.
+    """
+    if init_state is None:
+        init_state = PLPState()
+
+    with plate(name, size) as p:
+
+        async def run_one(state: PLPState, _i: int) -> tuple[PLPState, Any]:
+            return await fn(state)
+
+        return await avectorized_sample(
+            sample_fn=run_one,
+            init_state=init_state,
+            plate_ctx=p,
+            max_concurrency=max_concurrency,
+        )
+
+
+async def plate_areduce(
+    name: str,
+    size: int,
+    fn: Callable[[PLPState], Awaitable[tuple[PLPState, Any]]],
+    reducer: Callable[[list[Any]], Any],
+    init_state: PLPState | None = None,
+    *,
+    max_concurrency: int | None = None,
+) -> tuple[PLPState, Any]:
+    """
+    Async variant of :func:`plate_reduce`.
+
+    Args:
+        name: Identifier for this plate.
+        size: Number of independent runs.
+        fn: Async function taking state and returning (new_state, output).
+        reducer: Function combining outputs into one result.
+        init_state: Initial state.
+        max_concurrency: Passed to :func:`plate_amap`.
+
+    Returns:
+        Tuple of (combined state with plate event, reduced output).
+    """
+    states, outputs = await plate_amap(
+        name=name,
+        size=size,
+        fn=fn,
+        init_state=init_state,
+        max_concurrency=max_concurrency,
+    )
+
+    reduced = reducer(outputs)
+
+    combined_state = states[-1].copy() if states else PLPState()
+    combined_state.trace.append(
+        TraceEvent(
+            primitive=f"plate_areduce({name})",
             prompt=f"(plate: {size} runs)",
             output=str(reduced),
             meta={"plate_name": name, "plate_size": size, "all_outputs": outputs},

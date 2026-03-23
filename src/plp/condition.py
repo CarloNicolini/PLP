@@ -64,28 +64,3 @@ def sample_with_condition(
     # Return last sample even if condition not met
     return last_state, last_out
 
-
-async def asample_with_condition(
-    sample_fn: Callable[[PLPState, Any], tuple[PLPState, str]],
-    condition_fn: Callable[[PLPState, str], bool],
-    state: PLPState,
-    *args,
-    max_retries: int = 5,
-    **kwargs,
-) -> tuple[PLPState, str]:
-    """
-    Async version of sample_with_condition.
-
-    Note: sample_fn should be an async function returning (state, output_text).
-    """
-    last_state = state
-    last_out = ""
-
-    for attempt in range(max_retries):
-        s2, out = await sample_fn(last_state, *args, **kwargs)
-        last_state, last_out = s2, out
-
-        if condition_fn(last_state, last_out):
-            return last_state, last_out
-
-    return last_state, last_out
