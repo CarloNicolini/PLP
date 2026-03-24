@@ -2,16 +2,16 @@
 PLP Core Primitives.
 
 Decorators for the fundamental PLP operations:
-- sample: LLM-based stochastic generation
+- sample / asample: LLM-based stochastic generation (sync ``invoke`` / async ``ainvoke``)
 - observe: Hard 0/1 constraints
 - factor: Soft log-weight scoring (with scale/mask support)
 """
 
-from typing import Callable
 from functools import wraps
+from typing import Any, Callable
 
-from ._llm import LLMLike
-from .runtime import ensure_llm, run_prompt
+from ._llm import AsyncLLMLike, LLMLike
+from .runtime import ensure_async_llm, ensure_llm, arun_prompt, run_prompt
 from .state import PLPState, TraceEvent
 
 
@@ -62,6 +62,54 @@ def sample(
         def wrapped(state: PLPState, *args, **kwargs) -> tuple[PLPState, str]:
             prompt = fn(state, *args, **kwargs)
             new_state, output = run_prompt(
+                llm,
+                state,
+                name=prim_name,
+                prompt=prompt,
+                system_prompt=system_prompt,
+            )
+
+            if update_state is not None:
+                update_state(new_state, output)
+
+            return new_state, output
+
+        return wrapped
+
+    return decorator
+
+
+def asample(
+    llm: AsyncLLMLike | Any,
+    name: str | None = None,
+    update_state: Callable[[PLPState, str], None] | None = None,
+    system_prompt: str | None = None,
+):
+    """
+    Async decorator for LLM-based sample primitives (uses ``ainvoke``).
+
+    Same contract as :func:`sample`: the wrapped function returns the prompt
+    string; the wrapper returns ``(PLPState, str)`` but is an ``async def`` so
+    it composes with :func:`plp.plate_amap` and other async plate helpers.
+
+    Args:
+        llm: Object with ``async def ainvoke(messages) -> response`` (e.g. :class:`plp.client.PLPChatClient`)
+
+    Raises:
+        TypeError: If ``llm`` does not provide a callable ``ainvoke``
+        TypeError: If ``update_state`` is not callable
+    """
+    ensure_async_llm(llm)
+    if update_state is not None and not callable(update_state):
+        raise TypeError(f"update_state must be callable, got {type(update_state)}")
+
+    def decorator(fn: Callable[..., str]):
+        prim_name = name or fn.__name__
+
+        @wraps(fn)
+        async def wrapped(state: PLPState, *args, **kwargs) -> tuple[PLPState, str]:
+            prompt = fn(state, *args, **kwargs)
+            new_state, output = await arun_prompt(
                 llm,
                 state,
                 name=prim_name,

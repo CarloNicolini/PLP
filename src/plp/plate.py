@@ -1,23 +1,23 @@
 """
-PLP Plate Operator.
+PLP plate primitive.
 
-Provides plate context manager for independent, identically distributed
-repetition - matching NumPyro's plate syntax.
+`plate(...)` is the main entry-point for independent repetition. It can be used
+either as a context manager:
 
-Usage:
-    with plp.plate("candidates", 5) as indices:
-        for i in indices:
-            state, candidate = propose_solution(state, problem)
+    with plp.plate("candidates", 5) as p:
+        for i in p:
+            ...
+
+or as a fluent runner:
+
+    states, outputs = plp.plate("candidates", 5).map(fn, *args)
+    states, outputs = await plp.plate("candidates", 5).amap(async_fn, *args)
 
 Concurrency:
-    The global ``_plate_stack`` is not safe for concurrent *entry/exit* of
-    ``plate()`` / ``plate_stack()`` from multiple threads. Parallel helpers
-    (threaded: ``vectorized_sample(..., max_workers=...)``, ``plate_map(...)``;
-    async: ``avectorized_sample(...)``, ``plate_amap(...)``) run the per-index
-    body concurrently while a single plate context is active on the spawning
-    thread/task; that pattern is intended for I/O-bound work (e.g. LLM calls).
-    Do not nest new ``plate()`` contexts inside worker threads unless you
-    serialize those sections.
+    Plate context is task-local via ``contextvars`` so concurrent async tasks do
+    not share active plate state. Async helpers use ``asyncio.Semaphore`` to
+    bound concurrency. The threaded sync helpers remain best suited for
+    I/O-bound work.
 """
 
 from __future__ import annotations
@@ -25,7 +25,9 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from types import TracebackType
 from typing import Callable, Any, Awaitable, Iterator
 
 from .state import PLPState, TraceEvent
@@ -78,29 +80,193 @@ class PlateContext:
         return self.size / self.subsample_size
 
 
-# Stack of active plates (for nested plates)
-_plate_stack: list[PlateContext] = []
+@dataclass
+class PlateRunner:
+    """Configuration object for one plate that supports fluent execution."""
+
+    name: str
+    size: int
+    subsample_size: int | None = None
+    dim: int = -1
+    _active_context: PlateContext | None = field(default=None, init=False, repr=False)
+    _token: object | None = field(default=None, init=False, repr=False)
+
+    def _build_context(self) -> PlateContext:
+        if self.subsample_size is not None and self.subsample_size < self.size:
+            import random
+
+            indices = random.sample(range(self.size), self.subsample_size)
+        else:
+            indices = list(range(self.size))
+
+        return PlateContext(
+            name=self.name,
+            size=self.size,
+            subsample_size=self.subsample_size,
+            dim=self.dim,
+            indices=indices,
+        )
+
+    def __enter__(self) -> PlateContext:
+        if self._active_context is not None:
+            raise RuntimeError("This plate is already active")
+
+        ctx = self._build_context()
+        stack = _plate_stack_var.get()
+        token = _plate_stack_var.set((*stack, ctx))
+        self._active_context = ctx
+        self._token = token
+        return ctx
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        token = self._token
+        self._active_context = None
+        self._token = None
+        if token is not None:
+            _plate_stack_var.reset(token)
+
+    def map(
+        self,
+        fn: Callable[..., tuple[PLPState, Any]],
+        *args: Any,
+        init_state: PLPState | None = None,
+        max_workers: int | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[PLPState], list[Any]]:
+        """Run a synchronous function independently across the plate."""
+        if init_state is None:
+            init_state = PLPState()
+
+        with self as ctx:
+            def sample_fn(state: PLPState, _i: int) -> tuple[PLPState, Any]:
+                return fn(state, *args, **kwargs)
+
+            return vectorized_sample(
+                sample_fn=sample_fn,
+                init_state=init_state,
+                plate_ctx=ctx,
+                max_workers=max_workers,
+            )
+
+    def reduce(
+        self,
+        fn: Callable[..., tuple[PLPState, Any]],
+        reducer: Callable[[list[Any]], Any],
+        *args: Any,
+        init_state: PLPState | None = None,
+        max_workers: int | None = None,
+        **kwargs: Any,
+    ) -> tuple[PLPState, Any]:
+        """Run a synchronous plate and reduce the outputs."""
+        states, outputs = self.map(
+            fn,
+            *args,
+            init_state=init_state,
+            max_workers=max_workers,
+            **kwargs,
+        )
+        reduced = reducer(outputs)
+
+        combined_state = states[-1].copy() if states else PLPState()
+        combined_state.trace.append(
+            TraceEvent(
+                primitive=f"plate_reduce({self.name})",
+                prompt=f"(plate: {self.size} runs)",
+                output=str(reduced),
+                meta={
+                    "plate_name": self.name,
+                    "plate_size": self.size,
+                    "all_outputs": outputs,
+                },
+            )
+        )
+        return combined_state, reduced
+
+    async def amap(
+        self,
+        fn: Callable[..., Awaitable[tuple[PLPState, Any]]],
+        *args: Any,
+        init_state: PLPState | None = None,
+        max_concurrency: int | None = None,
+        **kwargs: Any,
+    ) -> tuple[list[PLPState], list[Any]]:
+        """Run an async function independently across the plate."""
+        if init_state is None:
+            init_state = PLPState()
+
+        with self as ctx:
+            async def sample_fn(state: PLPState, _i: int) -> tuple[PLPState, Any]:
+                return await fn(state, *args, **kwargs)
+
+            return await avectorized_sample(
+                sample_fn=sample_fn,
+                init_state=init_state,
+                plate_ctx=ctx,
+                max_concurrency=max_concurrency,
+            )
+
+    async def areduce(
+        self,
+        fn: Callable[..., Awaitable[tuple[PLPState, Any]]],
+        reducer: Callable[[list[Any]], Any],
+        *args: Any,
+        init_state: PLPState | None = None,
+        max_concurrency: int | None = None,
+        **kwargs: Any,
+    ) -> tuple[PLPState, Any]:
+        """Run an async plate and reduce the outputs."""
+        states, outputs = await self.amap(
+            fn,
+            *args,
+            init_state=init_state,
+            max_concurrency=max_concurrency,
+            **kwargs,
+        )
+        reduced = reducer(outputs)
+
+        combined_state = states[-1].copy() if states else PLPState()
+        combined_state.trace.append(
+            TraceEvent(
+                primitive=f"plate_areduce({self.name})",
+                prompt=f"(plate: {self.size} runs)",
+                output=str(reduced),
+                meta={
+                    "plate_name": self.name,
+                    "plate_size": self.size,
+                    "all_outputs": outputs,
+                },
+            )
+        )
+        return combined_state, reduced
+
+
+# Active plates are task-local so concurrent async programs do not share state.
+_plate_stack_var: ContextVar[tuple[PlateContext, ...]] = ContextVar(
+    "plp_plate_stack", default=()
+)
 
 
 def get_active_plate() -> PlateContext | None:
     """Get the currently active plate context, if any."""
-    return _plate_stack[-1] if _plate_stack else None
+    stack = _plate_stack_var.get()
+    return stack[-1] if stack else None
 
 
 def get_plate_stack() -> list[PlateContext]:
     """Get the full stack of active plates."""
-    return _plate_stack.copy()
+    return list(_plate_stack_var.get())
 
 
-@contextmanager
 def plate(
     name: str, size: int, subsample_size: int | None = None, dim: int = -1
-) -> Iterator[PlateContext]:
+) -> PlateRunner:
     """
-    Context manager for independent parallel repetition.
-
-    Matches NumPyro's plate syntax. Within a plate, you iterate over
-    indices to run independent samples.
+    Create a plate runner for independent repetition.
 
     Args:
         name: Identifier for this plate (e.g., "candidates", "data")
@@ -108,39 +274,15 @@ def plate(
         subsample_size: Optional mini-batch size for subsampling
         dim: Dimension for plate (for tensor compatibility, default -1)
 
-    Yields:
-        PlateContext that can be iterated for indices
-
-    Example (NumPyro-style):
+    Example (context manager):
         >>> with plp.plate("candidates", 5) as p:
-        ...     candidates = []
         ...     for i in p:
-        ...         state, candidate = propose(state, problem)
-        ...         candidates.append(candidate)
-        ...         p.add_result(state, candidate)
+        ...         ...
 
-    Example (subsampling):
-        >>> with plp.plate("data", len(dataset), subsample_size=32) as p:
-        ...     batch = [dataset[i] for i in p]
-        ...     # Process mini-batch
+    Example (fluent API):
+        >>> states, outputs = plp.plate("candidates", 5).map(propose_fn, problem)
     """
-    # Determine indices
-    if subsample_size is not None and subsample_size < size:
-        import random
-
-        indices = random.sample(range(size), subsample_size)
-    else:
-        indices = list(range(size))
-
-    ctx = PlateContext(
-        name=name, size=size, subsample_size=subsample_size, dim=dim, indices=indices
-    )
-
-    _plate_stack.append(ctx)
-    try:
-        yield ctx
-    finally:
-        _plate_stack.pop()
+    return PlateRunner(name=name, size=size, subsample_size=subsample_size, dim=dim)
 
 
 def vectorized_sample(
@@ -247,17 +389,18 @@ async def avectorized_sample(
 
 
 # ============================================================
-# Convenience functions (keep for backwards compatibility)
+# Convenience helpers built on top of plate
 # ============================================================
 
 
 def plate_map(
     name: str,
     size: int,
-    fn: Callable[[PLPState], tuple[PLPState, Any]],
+    fn: Callable[..., tuple[PLPState, Any]],
+    *args: Any,
     init_state: PLPState | None = None,
-    *,
     max_workers: int | None = None,
+    **kwargs: Any,
 ) -> tuple[list[PLPState], list[Any]]:
     """
     Run a function N times independently, collecting results.
@@ -278,44 +421,24 @@ def plate_map(
     Example:
         >>> states, candidates = plate_map("candidates", 5, propose_fn)
     """
-    if init_state is None:
-        init_state = PLPState()
-
-    states: list[PLPState] = []
-    outputs: list[Any] = []
-
-    with plate(name, size) as p:
-        if max_workers is None or max_workers <= 1:
-            for _ in p:
-                state_copy = init_state.copy()
-                final_state, output = fn(state_copy)
-                states.append(final_state)
-                outputs.append(output)
-                p.add_result(final_state, output)
-        else:
-
-            def run_one(_i: int) -> tuple[PLPState, Any]:
-                state_copy = init_state.copy()
-                return fn(state_copy)
-
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                results = list(pool.map(run_one, p.indices))
-            for final_state, output in results:
-                states.append(final_state)
-                outputs.append(output)
-                p.add_result(final_state, output)
-
-    return states, outputs
+    return plate(name, size).map(
+        fn,
+        *args,
+        init_state=init_state,
+        max_workers=max_workers,
+        **kwargs,
+    )
 
 
 def plate_reduce(
     name: str,
     size: int,
-    fn: Callable[[PLPState], tuple[PLPState, Any]],
+    fn: Callable[..., tuple[PLPState, Any]],
     reducer: Callable[[list[Any]], Any],
+    *args: Any,
     init_state: PLPState | None = None,
-    *,
     max_workers: int | None = None,
+    **kwargs: Any,
 ) -> tuple[PLPState, Any]:
     """
     Run fn N times and reduce the outputs to a single result.
@@ -340,31 +463,24 @@ def plate_reduce(
         ...     reducer=lambda outs: max(set(outs), key=outs.count)
         ... )
     """
-    states, outputs = plate_map(name, size, fn, init_state, max_workers=max_workers)
-
-    reduced = reducer(outputs)
-
-    # Create a combined state with plate trace event
-    combined_state = states[-1].copy() if states else PLPState()
-    combined_state.trace.append(
-        TraceEvent(
-            primitive=f"plate_reduce({name})",
-            prompt=f"(plate: {size} runs)",
-            output=str(reduced),
-            meta={"plate_name": name, "plate_size": size, "all_outputs": outputs},
-        )
+    return plate(name, size).reduce(
+        fn,
+        reducer,
+        *args,
+        init_state=init_state,
+        max_workers=max_workers,
+        **kwargs,
     )
-
-    return combined_state, reduced
 
 
 async def plate_amap(
     name: str,
     size: int,
-    fn: Callable[[PLPState], Awaitable[tuple[PLPState, Any]]],
+    fn: Callable[..., Awaitable[tuple[PLPState, Any]]],
+    *args: Any,
     init_state: PLPState | None = None,
-    *,
     max_concurrency: int | None = None,
+    **kwargs: Any,
 ) -> tuple[list[PLPState], list[Any]]:
     """
     Async variant of :func:`plate_map` for concurrent async LLM calls.
@@ -380,30 +496,24 @@ async def plate_amap(
     Returns:
         Tuple of (list of final states, list of outputs), in index order.
     """
-    if init_state is None:
-        init_state = PLPState()
-
-    with plate(name, size) as p:
-
-        async def run_one(state: PLPState, _i: int) -> tuple[PLPState, Any]:
-            return await fn(state)
-
-        return await avectorized_sample(
-            sample_fn=run_one,
-            init_state=init_state,
-            plate_ctx=p,
-            max_concurrency=max_concurrency,
-        )
+    return await plate(name, size).amap(
+        fn,
+        *args,
+        init_state=init_state,
+        max_concurrency=max_concurrency,
+        **kwargs,
+    )
 
 
 async def plate_areduce(
     name: str,
     size: int,
-    fn: Callable[[PLPState], Awaitable[tuple[PLPState, Any]]],
+    fn: Callable[..., Awaitable[tuple[PLPState, Any]]],
     reducer: Callable[[list[Any]], Any],
+    *args: Any,
     init_state: PLPState | None = None,
-    *,
     max_concurrency: int | None = None,
+    **kwargs: Any,
 ) -> tuple[PLPState, Any]:
     """
     Async variant of :func:`plate_reduce`.
@@ -419,27 +529,14 @@ async def plate_areduce(
     Returns:
         Tuple of (combined state with plate event, reduced output).
     """
-    states, outputs = await plate_amap(
-        name=name,
-        size=size,
-        fn=fn,
+    return await plate(name, size).areduce(
+        fn,
+        reducer,
+        *args,
         init_state=init_state,
         max_concurrency=max_concurrency,
+        **kwargs,
     )
-
-    reduced = reducer(outputs)
-
-    combined_state = states[-1].copy() if states else PLPState()
-    combined_state.trace.append(
-        TraceEvent(
-            primitive=f"plate_areduce({name})",
-            prompt=f"(plate: {size} runs)",
-            output=str(reduced),
-            meta={"plate_name": name, "plate_size": size, "all_outputs": outputs},
-        )
-    )
-
-    return combined_state, reduced
 
 
 # ============================================================
@@ -467,14 +564,15 @@ def plate_stack(prefix: str, sizes: list[int]) -> Iterator[list[PlateContext]]:
         ...     # plates[1] is plate("batch_1", 5)
     """
     contexts = []
+    stack = _plate_stack_var.get()
 
     for i, size in enumerate(sizes):
         ctx = PlateContext(name=f"{prefix}_{i}", size=size, indices=list(range(size)))
         contexts.append(ctx)
-        _plate_stack.append(ctx)
+        stack = (*stack, ctx)
 
+    token = _plate_stack_var.set(stack)
     try:
         yield contexts
     finally:
-        for _ in sizes:
-            _plate_stack.pop()
+        _plate_stack_var.reset(token)

@@ -1,36 +1,30 @@
-"""
-Pytest configuration and fixtures for PLP tests.
+"""Pytest fixtures for PLP."""
 
-Loads .env file and provides shared fixtures for LLM client and state.
-"""
+from types import SimpleNamespace
 
 import pytest
-from dotenv import load_dotenv
-from plp import ChatOpenAI, PLPState
+
+from plp import PLPState
 
 
-# Load environment variables from .env file
-load_dotenv()
+class MockLLM:
+    model = "mock-model"
+    temperature = 0.0
+
+    def __init__(self, content: str = "ok") -> None:
+        self.content = content
+
+    def invoke(self, messages):
+        return SimpleNamespace(content=self.content)
+
+    async def ainvoke(self, messages):
+        return SimpleNamespace(content=self.content)
 
 
 @pytest.fixture
-def llm() -> ChatOpenAI:
-    """
-    Provide a configured LLM client for tests.
-
-    Uses gpt-4.1-mini as specified in requirements.
-    """
-    return ChatOpenAI(model="gpt-4.1-mini", temperature=0.7)
-
-
-@pytest.fixture
-def llm_deterministic() -> ChatOpenAI:
-    """
-    Provide a more deterministic LLM client (temperature=0.1).
-
-    Useful for tests that expect more consistent outputs.
-    """
-    return ChatOpenAI(model="gpt-4.1-mini", temperature=0.1)
+def llm() -> MockLLM:
+    """Provide a deterministic LLM-like object for tests."""
+    return MockLLM()
 
 
 @pytest.fixture

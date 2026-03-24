@@ -5,6 +5,7 @@ Program transformers for trace manipulation, replay, blocking, and interventions
 Inspired by Pyro's effect handlers.
 """
 
+from contextvars import ContextVar
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterator, TypeVar
@@ -22,41 +23,51 @@ class HandlerContext:
     active: bool = True
 
 
-# ============================================================
-# Generic Handler Context Manager Factory
-# ============================================================
-
-_handler_stack: dict[str, Any] = {}
+# Handler contexts are task-local so concurrent async calls do not interfere.
+_handler_stacks: ContextVar[dict[str, tuple[Any, ...]]] = ContextVar(
+    "plp_handler_stacks", default={}
+)
 
 
 def _push_handler(handler_type: str, context: T) -> T:
     """Push a handler context onto the stack."""
-    _handler_stack[handler_type] = context
+    stacks = dict(_handler_stacks.get())
+    current = stacks.get(handler_type, ())
+    stacks[handler_type] = (*current, context)
+    _handler_stacks.set(stacks)
     return context
 
 
 def _pop_handler(handler_type: str) -> Any:
     """Pop a handler context from the stack."""
-    return _handler_stack.pop(handler_type, None)
+    stacks = dict(_handler_stacks.get())
+    current = stacks.get(handler_type, ())
+    if not current:
+        return None
+
+    popped = current[-1]
+    if len(current) == 1:
+        stacks.pop(handler_type, None)
+    else:
+        stacks[handler_type] = current[:-1]
+    _handler_stacks.set(stacks)
+    return popped
 
 
 def _get_handler(handler_type: str) -> Any:
     """Get the active handler context, if any."""
-    return _handler_stack.get(handler_type)
+    current = _handler_stacks.get().get(handler_type, ())
+    return current[-1] if current else None
 
 
 @contextmanager
 def _generic_handler(handler_type: str, context: T) -> Iterator[T]:
     """Generic context manager for handler contexts."""
-    old_context = _get_handler(handler_type)
     _push_handler(handler_type, context)
     try:
         yield context
     finally:
-        if old_context is not None:
-            _push_handler(handler_type, old_context)
-        else:
-            _pop_handler(handler_type)
+        _pop_handler(handler_type)
 
 
 # ============================================================
