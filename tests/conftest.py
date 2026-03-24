@@ -1,30 +1,39 @@
 """Pytest fixtures for PLP."""
 
-from types import SimpleNamespace
+from __future__ import annotations
+
+import os
+from pathlib import Path
 
 import pytest
+from dotenv import load_dotenv
 
-from plp import PLPState
+from plp import PLPChatClient, PLPState
 
-
-class MockLLM:
-    model = "mock-model"
-    temperature = 0.0
-
-    def __init__(self, content: str = "ok") -> None:
-        self.content = content
-
-    def invoke(self, messages):
-        return SimpleNamespace(content=self.content)
-
-    async def ainvoke(self, messages):
-        return SimpleNamespace(content=self.content)
+TEST_MODEL = "openai/gpt-4.1-mini"
 
 
-@pytest.fixture
-def llm() -> MockLLM:
-    """Provide a deterministic LLM-like object for tests."""
-    return MockLLM()
+def _load_test_env() -> None:
+    """Load local environment variables for live LLM tests."""
+    project_root = Path(__file__).resolve().parents[1]
+    load_dotenv(project_root / ".env", override=False)
+    load_dotenv(override=False)
+
+
+@pytest.fixture(scope="session")
+def llm() -> PLPChatClient:
+    """Provide a live OpenAI-compatible client for tests."""
+    _load_test_env()
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        pytest.skip("OPENAI_API_KEY is required for live LLM tests.")
+
+    return PLPChatClient(
+        model=TEST_MODEL,
+        temperature=0.0,
+        api_key=api_key,
+        base_url=os.environ.get("OPENAI_BASE_URL"),
+    )
 
 
 @pytest.fixture

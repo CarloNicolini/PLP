@@ -4,13 +4,14 @@ import plp
 def test_sample_logs_trace(llm):
     @plp.sample(llm, name="demo_site")
     def ask(state: plp.PLPState) -> str:
-        return "Reply with a short acknowledgement."
+        return "Reply with the single word acknowledged."
 
     state = plp.PLPState()
     new_state, output = ask(state)
 
-    assert output == "ok"
+    assert "acknowledged" in output.lower()
     assert new_state.trace[-1].primitive == "demo_site"
+    assert new_state.trace[-1].meta["llm"].startswith("openai/gpt-4.1-mini")
 
 
 def test_observe_marks_invalid_state():
