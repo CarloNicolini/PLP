@@ -1,0 +1,451 @@
+\documentclass[aps,pre,reprint,superscriptaddress,nofootinbib]{revtex4-2}
+
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{hyperref}
+\usepackage{url}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\KL}{D_{\mathrm{KL}}}
+\newcommand{\given}{\,|\,}
+\newcommand{\RR}{\mathbb{R}}
+\newcommand{\voc}{\mathcal{V}}
+\newcommand{\bos}{\mathsf{BOS}}
+\newcommand{\eos}{\mathsf{EOS}}
+\newcommand{\cX}{\mathcal{X}}
+\newcommand{\cY}{\mathcal{Y}}
+\newcommand{\augvoc}{\mathcal{V}_{\mathrm{aug}}}
+\newcommand{\cP}{\mathcal{P}}
+\newcommand{\cF}{\mathcal{F}}
+\newcommand{\y}{\mathbf{y}}
+\newcommand{\softargmax}{\operatorname{softargmax}}
+
+\begin{document}
+
+\title{Prompting as Proposal Transport Toward Low-Free-Energy Language States}
+
+\author{Carlo Nicolini\\\url{c.nicolini@ipazia.com}}
+\affiliation{Ipazia Spa, Milan, Italy}
+\begin{abstract}
+Recent work has shown that autoregressive language models admit an exact description in the language of energy-based models and maximum-entropy reinforcement learning. 
+That result clarifies why next-token prediction can encode limited lookahead, but it leaves open a complementary question: what do inference-time prompting techniques do when the distilled policy is still far from the verifier-weighted target distribution required by a task? 
+The primitive stochastic objects remain token-level autoregressive kernels. PLP lifts these token-level laws to sequence-level response distributions, because semantic meaning, correctness, and verifier scores attach only to whole sequences. 
+A deployed language model and runtime therefore induce a proposal law $\pi_{\mathcal D}(\y \given x)$ over responses $\y \in \cY$ for a prompt $x \in \cX$, while a verifier or reward defines a nonnegative potential $\Phi(\y,x)$.
+The semantic target is the reweighted distribution $p_\beta(\y \given x)\propto \pi_{\mathcal D}(\y \given x)e^{\beta R(\y,x)}$ with $R=\log \Phi$. 
+In this form, prompting becomes an inference-time procedure for transporting probability mass from the proposal toward high-reward, low-free-energy responses.
+We derive the corresponding soft Bellman recursion and show that the optimal steered policy is a Doob $h$-transform of the base autoregressive process. 
+Within this framework, zero-shot prompting leaves the proposal nearly untouched, few-shot prompting changes the boundary condition and local geometry of the proposal, and chain-of-thought introduces latent intermediate states that decompose a hard global transport into smaller conditional moves. 
+Self-consistency and tree-search variants then appear as approximate marginalization and sequential Monte Carlo over alternative completions. 
+We make explicit where inference-time compute can help, and state an equally sharp limitation: if the base proposal assigns negligible mass to the desired basin, prompting cannot recover the target by selection alone.
+\end{abstract}
+
+\maketitle
+
+\section{Introduction}
+
+Prompting and search-based scaffolds often improve the behavior of large language models on tasks that require multiple constraints to be satisfied at once. 
+Yet the usual vocabulary for these gains still leans on loose cognitive metaphors such as reasoning, reflection, or deliberation.
+That language is intuitive, but it hides the operational question that matters for inference: how does an intervention change the distribution over complete responses that the system can generate?
+
+Probabilistic Language Programming (PLP) provides a direct way to ask that question.
+At the model interface, randomness enters token by token. At the semantic interface, however, the relevant object is not an isolated token but a complete response $\y \in \cY$.
+PLP therefore treats the full output string as primary for semantic evaluation.
+For a fixed deployment $\mathcal D$ and prompt $x \in \cX$, the base language model induces a proposal law on $\cY$.
+Verifiers, tests, and reward signals then reweight those responses into a semantic target distribution.
+Recent work on the equivalence between autoregressive language models, energy-based models, and maximum-entropy reinforcement learning makes this proposal-target split especially useful at inference time: the same mathematics that describes training-time distillation also describes runtime steering toward a verifier-weighted target \cite{blondel2025autoregressive,levine2018reinforcement}.
+
+The present paper develops that inference-time view in a form suitable for statistical physics and stochastic control.
+We argue that prompting techniques are best read as approximate transport operators that move a base proposal toward a target concentrated on high-reward, low-free-energy responses.
+Zero-shot prompting relies almost entirely on the lookahead already compressed into the model parameters.
+Few-shot prompting reshapes the initial boundary condition by changing the prompt-conditioned proposal itself.
+Chain-of-thought (CoT) introduces latent intermediate states and breaks a difficult long-horizon transport into smaller conditional moves.
+Self-consistency, tree search, and sequential Monte Carlo (SMC) then appear as progressively richer approximations to marginalization and resampling over multiple sampled completions \cite{wang2022self,yao2023tree,zhao2024probabilistic,loula2025syntactic}.
+
+This viewpoint gives two useful consequences.
+First, it states clearly when inference-time compute can help: extra prompting or branching is valuable when the desired target is already within reasonable reach of the proposal but the continuation values of promising prefixes are poorly estimated.
+Second, it states a limit that is just as important.
+If the correct basin lies outside the effective support of the proposal, selection alone cannot retrieve it \cite{mukherjee2025test}.
+The paper is therefore a theoretical framework, not an empirical claim that any specific prompt always improves performance.
+
+\section{Setup and notation}
+
+Let $V$ be the vocabulary size, and let $\voc \coloneqq \{1, \ldots, V\}$ be the vocabulary set.
+We denote the set of sequences of length $t$ in $\voc$ by $\voc^t$.
+We consider two special tokens that are excluded from $\voc$: a $\bos$ (beginning of sequence) token that encodes the beginning of a prompt and an $\eos$ (end of sequence) token that encodes the end of a response.
+We denote the set of prompts of maximal size $U$ ($\bos$ included) by
+\begin{equation}
+\cX = \{\bos\} \times \bigcup_{t=1}^{U-1} \voc^t,
+\end{equation}
+and the set of responses of maximal size $T$ ($\eos$ included) by
+\begin{equation}
+\cY = \bigcup_{t=1}^{T-1} \voc^t \times \{\eos\}.
+\end{equation}
+A response $\y = (y_1, \dots, y_\tau) \in \cY$ always ends with $\eos$: $y_\tau = \eos$.
+We denote the length of $\y$ (including $\eos$) by $|\y|$.
+We write $\y_{<t} \coloneqq (y_1, \ldots, y_{t-1})$ for $t > 1$ and set $\y_{<1} \coloneqq \varnothing$.
+We denote the vocabulary augmented with the $\eos$ token by $\augvoc \coloneqq \voc \cup \{\eos\}$.
+We use $\oplus$ to indicate concatenation.
+Random variables are denoted by capital letters, e.g., $Y$.
+Given the finite set $\cY$, we define the space of probability distributions \emph{with full support} over $\cY$ as $\cP(\cY)$ and the set of functions $f \colon \cY \to \RR$ as $\cF(\cY)$.
+Given $f \in \cF(\cY)$, we define $\softargmax(f) \in \cP(\cY)$ by
+\begin{equation}
+\softargmax(f)(\y) \coloneqq \frac{\exp f(\y)}{\sum_{\y' \in \cY} \exp f(\y')}.
+\end{equation}
+
+\section{Proposal-target geometry for inference-time language use}
+
+Let $x \in \cX$ denote a prompt and $\y=(y_1,\ldots,y_{|\y|}) \in \cY$ a response with $y_{|\y|}=\eos$.
+At the token level, let $a_t \coloneqq y_t$ and let $s_t = x \oplus \y_{<t}$ be the textual prefix available before emitting $y_t$ (with $s_1=x$ in concatenation form).
+The deployed system, denoted by its internal weights and decoding hyperparameters $\mathcal D$, induces the autoregressive response law
+\begin{equation}
+\pi_{\mathcal D}(\y \given x) = \prod_{t=1}^{|\y|} \pi_{\mathcal D}\!\left(y_t \given x \oplus \y_{<t}\right),
+\label{eq:proposal-factorization}
+\end{equation}
+where each conditional is a distribution on $\augvoc$, and the product assigns positive mass only to sequences that terminate with $\eos$ at step $|\y|$.
+For inverse temperature $\beta \ge 0$, we define the semantic target distribution $p_\beta(\y \given x)$ by
+\begin{equation}
+\begin{aligned}
+p_\beta(\y \given x) &= \frac{\pi_{\mathcal D}(\y \given x)\,e^{\beta R(\y,x)}}{Z_\beta(x)}, \\
+Z_\beta(x) &= \sum_{\y' \in \cY}\pi_{\mathcal D}(\y' \given x)\,e^{\beta R(\y',x)}.
+\end{aligned}
+\label{eq:target-dist}
+\end{equation}
+Equation \eqref{eq:target-dist} is the central object of this work.
+In other words, running a composed AI system defines a reference-measure energy-based model over $\cY$.
+
+The same semantic target distribution is the optimizer of a KL-regularized maximum-entropy control objective~\cite{ziebart2008maximum}. 
+For any trial distribution $q(\y\given x)$ on $\cY$, the variational functional $\mathcal J_\beta[q]$ reads
+\begin{equation}
+\mathcal J_\beta[q] := \E_{q}\!\left[R(\y,x)\right] -\beta^{-1}\KL\!\left(q(\y\given x)\,\|\,\pi_{\mathcal D}(\y\given x)\right),
+\label{eq:variational-objective}
+\end{equation}
+and is minimized by the target distribution $p_\beta(\y\given x)$.
+
+It is useful to write the same target in free-energy form: define the response free energy
+\begin{equation}
+\mathcal F_\beta(\y,x):=-R(\y,x)-\beta^{-1}\log \pi_{\mathcal D}(\y \given x),
+\label{eq:response-free-energy}
+\end{equation}
+so that
+\begin{equation}
+p_\beta(\y \given x)=\frac{\exp[-\beta \mathcal F_\beta(\y,x)]}{Z_\beta(x)}.
+\label{eq:target-free-energy}
+\end{equation}
+This means that high reward alone does not define a preferred response; instead the target concentrates on outputs that are simultaneously valuable under the verifier and reachable under the proposal.
+In this sense, prompting aims to move mass toward low-free-energy basins, not merely toward high local token probability~\cite{mukherjee2025test}.
+
+Equation \eqref{eq:target-dist} also makes the support problem explicit: if the desired basin carries negligible proposal mass, then no amount of reranking can recover it.
+% One convenient diagnostic is the support gap
+% \begin{equation}
+% \mathrm{Gap}_{\epsilon}(x):=p_\beta\!\left(\left\{\y:\pi_{\mathcal D}(\y \given x)\le \epsilon\right\}\middle|x\right),
+% \label{eq:support-gap}
+% \end{equation}
+% which measures how much target mass sits in the low-probability tail of the proposal.
+% When $\mathrm{Gap}_{\epsilon}(x)$ is large, selection-only methods operate in a transport-limited regime \cite{mukherjee2025test}.
+% The right intervention is then to change the proposal itself through better context, retrieval, decompositions, or latent steering.
+
+% This support-gap diagnostic is closely related to, but not identical with, the notion of generator coverage studied by Mukherjee \textit{et al.}~\cite{mukherjee2025test}.
+% Their analysis works with verifier-defined acceptable sets, a coverage constraint, and a decomposition of sub-optimality into optimal transport cost and policy-improvement terms.
+% In that setting, increasing coverage does not help uniformly: the sub-optimality--coverage curve can enter a transport regime, a policy-improvement regime, or a saturation regime depending on verifier ROC and algorithmic sub-optimality.
+% We use $\mathrm{Gap}_{\epsilon}(x)$ only as a qualitative overlap diagnostic.
+% It should not be identified with their coverage parameter unless the verifier semantics and admissible policy class are matched explicitly.
+
+\section{Soft values, continuation partitions, and Doob transforms}
+
+The bridge to maximum-entropy reinforcement learning still runs through prefixes, because the deployed model acts one token or action at a time.
+At the token level, the local stochastic object is still $\pi_{\mathcal D}(a\given s)$. PLP, however, is interested in the sequence-level semantic object induced by that prefix: the verifier-weighted mass of all complete continuations extending it.
+We define the continuation partition
+\begin{equation}
+Z_\beta(s):=\sum_{\y\in\cY_s}\pi_{\mathcal D}(\y \given x)\,e^{\beta R_{\ge s}(\y)},
+\label{eq:continuation-partition}
+\end{equation}
+where $\cY_s:=\{\y\in\cY : \text{$s$ is a prefix of } x\oplus\y\}$, the prompt $x$ is fixed by context, and $R_{\ge s}(\y)$ denotes the reward-to-go from prefix $s$.
+The associated continuation value is
+\begin{equation}
+V_\beta(s):=\beta^{-1}\log Z_\beta(s).
+\label{eq:continuation-value}
+\end{equation}
+This is a continuation functional: it measures the verifier-weighted future mass reachable from prefix $s$.
+The token-level kernel $\pi_{\mathcal D}(a\given s)$ is the primitive stochastic ingredient, but $V_\beta(s)$ is a sequence-level object because it aggregates complete responses $\y\in\cY$.
+It is not, in general, identical to Blondel \textit{et al.}'s token-level $V_q$ term.
+In their ARM/EBM correspondence, $V_q$ is defined from local autoregressive scores and a path-wise factorization over plain token sequences.
+Our $V_\beta(s)$ instead sums over full completions consistent with the prefix $s$.
+The two objects coincide only in the special case where the response is a plain token continuation and the verifier-induced reward reduces to the same autoregressive, Markovized factorization used in the ARM/EBM construction \cite{blondel2025autoregressive}.
+
+To recover an exact Bellman-style recursion, we now impose an additional assumption: the verifier contribution can be written in additive Markov form over the chosen prefix state, or equivalently the state has been augmented so that the remaining reward is conditionally Markov.
+Under that assumption, the full response reward is
+\begin{equation}
+R(\y)=\sum_{t=1}^{|\y|} r(s_t,a_t),
+\label{eq:additive-reward}
+\end{equation}
+with any terminal score absorbed into the final reward term, so the reward-to-go $R_{\ge s}(\y)$ is obtained by the corresponding suffix sum from prefix $s$ onward.
+For arbitrary global verifiers this step is not automatic; in that case $V_\beta(s)$ remains well-defined, but the recursion below should be read as an exact identity only on an augmented state space, or as the target of a prefix-value approximation otherwise.
+The continuation partition then obeys the recursion
+\begin{equation}
+Z_\beta(s)=\sum_{a}\pi_{\mathcal D}(a\given s)e^{\beta r(s,a)}Z_\beta(s\oplus a).
+\label{eq:partition-recursion}
+\end{equation}
+Defining
+\begin{equation}
+Q_\beta(s,a):=r(s,a)+V_\beta(s\oplus a),
+\label{eq:q-def}
+\end{equation}
+we obtain the soft Bellman relation~\cite{blondel2025autoregressive,levine2018reinforcement}.
+\begin{equation}
+V_\beta(s)=\beta^{-1}\log \sum_{a}\pi_{\mathcal D}(a\given s)e^{\beta Q_\beta(s,a)}.
+\label{eq:soft-bellman}
+\end{equation}
+Equation \eqref{eq:soft-bellman} has the same Bellman/log-partition algebra emphasized in the ARM/EBM equivalence \cite{blondel2025autoregressive}, but it should be read here as an inference-time scaffold analogue rather than as the same object by definition.
+Blondel \textit{et al.} work with token-level autoregressive states and a specific local scoring function $q$; we work with verifier-weighted continuations.
+The parallel is therefore structural, and becomes exact only under the restricted conditions stated above.
+
+The optimal steered one-step policy that samples from the verifier-weighted target is therefore
+\begin{equation}
+\pi^\star_\beta(a\given s)=\frac{\pi_{\mathcal D}(a\given s)e^{\beta Q_\beta(s,a)}}{\sum_{a'}\pi_{\mathcal D}(a'\given s)e^{\beta Q_\beta(s,a')}}.
+\label{eq:optimal-soft-policy}
+\end{equation}
+Equivalently,
+\begin{equation}
+\pi^\star_\beta(a\given s)=\pi_{\mathcal D}(a\given s)\exp\!\left[\beta\bigl(Q_\beta(s,a)-V_\beta(s)\bigr)\right].
+\label{eq:optimal-soft-policy-adv}
+\end{equation}
+If we write $h_\beta(s)=e^{\beta V_\beta(s)}=Z_\beta(s)$, then
+\begin{equation}
+\pi^\star_\beta(a\given s)=\pi_{\mathcal D}(a\given s)e^{\beta r(s,a)}
+\frac{h_\beta(s\oplus a)}{h_\beta(s)}.
+\label{eq:doob-form}
+\end{equation}
+Equation \eqref{eq:doob-form} is the discrete Doob $h$-transform of the base autoregressive process~\cite{doob1957conditional}.
+It is also the natural bridge to path-integral control and Schr\"odinger bridge formulations of stochastic steering \cite{kappen2005path,zhao2024probabilistic,bernton2019schr,lew2023sequential}. 
+Inference-time prompting is useful precisely because the model's one-shot forward pass only approximates the required continuation function $h_\beta$.
+
+The same statement can be phrased as an entropy-regularized transport problem. 
+Among all laws on $\cY$ that approximate the desired verifier-weighted target, the preferred law is the one that stays closest to the uncontrolled autoregressive dynamics:
+\begin{equation}
+q^\star = \arg\min_{q} \KL\!\left(q(\y\given x)\,\|\,\pi_{\mathcal D}(\y\given x)\right).
+\label{eq:sb-problem}
+\end{equation}
+The minimization is taken under the target condition encoded by $\Phi$.
+When the verifier acts through an endpoint distribution or terminal marginal, this becomes a Schr\"odinger-bridge problem in the strict sense of finding the process closest in KL to a reference Markov process while matching the target endpoint \cite{bernton2019schr}.
+For general path-dependent potentials, the same expression should be read more cautiously as KL-regularized stochastic steering rather than as a literal Schr\"odinger bridge.
+This is the sense in which prompting does more than filter samples.
+It tries to realize the least-deforming transport from the raw proposal toward the high-reward target that the available compute can approximate.
+
+\section{Prompting as approximate transport from proposal to target}
+
+The ideal inference-time controller would sample from $\pi^\star_\beta$ in Eq.~\eqref{eq:optimal-soft-policy}. 
+Real prompting methods instead construct an approximation $\tilde{\pi}$ whose purpose is to reduce the mismatch
+\begin{equation}
+\KL\!\left(p_\beta(\y\given x)\,\|\,\tilde{\pi}(\y\given x)\right)
+\label{eq:transport-mismatch}
+\end{equation}
+or, more modestly, to increase overlap with the high-value part of the target.
+The main point is simple: prompting methods differ by how they alter the proposal, how they estimate the continuation value, and when they reweight or resample partial continuations.
+Zero-shot leaves the proposal almost unchanged.
+Few-shot changes the prompt-conditioned proposal before decoding begins.
+CoT introduces latent intermediate states.
+Self-consistency approximates marginalization over latent rationale--answer paths.
+Tree-search and SMC-style methods add explicit weighting and resampling over prefixes.
+
+A related literature makes the sampling aspect explicit at decode time rather than through prompting alone.
+CGMH samples directly in discrete sentence space with a Metropolis--Hastings chain whose stationary distribution combines fluency with hard or soft constraints, using local replacement, insertion, and deletion proposals entirely at inference time \cite{miao2019cgmh}.
+COLD and MuCoLa instead define a single energy that combines language-model likelihood with differentiable constraints and then run Langevin dynamics over a continuous relaxation of the full output sequence, effectively replacing standard left-to-right ancestral decoding with gradient-based Monte Carlo sampling \cite{qin2022cold,kumar2022gradient}.
+These works do not show that ordinary prompting is itself MCMC.
+They show something slightly different and more precise: once generation is framed as sampling from a constraint- or verifier-weighted target, decoding can be implemented by explicit Monte Carlo transport in sequence space.
+Our proposal-transport interpretation places prompt engineering on the same spectrum, but at the lighter-weight end where one primarily changes the proposal or the latent factorization rather than replacing the sampler altogether.
+
+\subsection{Zero-shot prompting}
+
+In zero-shot prompting the answer is drawn directly from the base model:
+\begin{equation}
+\tilde{\pi}_{\mathrm{zs}}(\y\given x)=\pi_{\mathcal D}(\y\given x).
+\label{eq:zs}
+\end{equation}
+This regime is attractive because it spends almost no explicit inference-time compute.
+Its success depends on how well pretraining and alignment have already distilled the downstream verifier-weighted target into the model parameters.
+When that compression is good, Eq.~\eqref{eq:optimal-soft-policy} can be approximated by a single forward pass.
+When it is poor, zero-shot decoding jumps far in $\cY$ under the base kernel and accumulates the full burden of the value mismatch at once.
+
+The support view explains the failure mode.
+Suppose the correct answer set $A^\star(x)$ is narrow and the proposal mass $\pi_{\mathcal D}(A^\star(x)\given x)$ is already very small.
+Then additional confidence in the single sampled answer says little about the true target, because the proposal never entered the right basin in the first place.
+Zero-shot prompting therefore tests the base proposal more than it changes it.
+
+\subsection{Few-shot prompting as proposal preconditioning}
+
+Few-shot prompting appends exemplars $\mathcal E=(e_1,\ldots,e_m)$ to the prompt and samples from
+\begin{equation}
+\tilde{\pi}_{\mathrm{fs}}(\y\given x)=\pi_{\mathcal D}(\y\given [\mathcal E;x]).
+\label{eq:fs}
+\end{equation}
+The most direct reading of Eq.~\eqref{eq:fs} is that few-shot prompting changes the boundary condition of the autoregressive process.
+The examples reshape the proposal before any answer token is emitted.
+In the language of stochastic control, they precondition the local geometry of the path: prefixes that resemble the exemplars become cheaper under the proposal, while incompatible continuations become relatively less likely.
+
+This interpretation clarifies why few-shot prompting can help even when the final verifier is unchanged.
+The exemplars do not usually alter the desired task-level target itself.
+They alter the reference measure from which responses are drawn, ideally shrinking the overlap gap between proposal and target high-mass regions \cite{mukherjee2025test}.
+The effect is beneficial when the exemplars move mass toward the right solution family.
+It can be harmful when they inject hidden biases, enforce an irrelevant decomposition, or implicitly redefine the task.
+Few-shot prompting is therefore a proposal intervention, not merely an answer-selection device.
+
+\subsection{Chain-of-thought as latent-variable transport}
+
+CoT does not alter the basic fact that the model samples tokens autoregressively. What it changes is the sequence on which semantic weight is placed. Instead of treating the final answer $y$ alone as the relevant response object, CoT constructs an extended response consisting of a rationale subsequence $z:=z_{1:K}$ followed by the answer subsequence $y$. To shorten notation, let $z_{<k}:=z_{1:k-1}$ denote the rationale prefix. The induced proposal over complete rationale-answer sequences factorizes as
+\begin{equation}
+\begin{aligned}
+\tilde{\pi}_{\mathrm{cot}}(y,z\given x) &= \pi(z_1\given x)
+\\
+&\quad \times
+\prod_{k=2}^{K}\pi(z_k\given x,z_{<k}) \pi(y\given x,z).
+\end{aligned}
+\label{eq:cot-factorization}
+\end{equation}
+This remains a token-level autoregressive law, but PLP assigns semantic meaning only after the full sequence $(z,y)$ has been produced, or after projecting that sequence onto the final answer. The observable answer law is then the sequence-level marginal
+\begin{equation}
+\tilde{\pi}_{\mathrm{cot}}(y\given x)
+=
+\sum_{z}\tilde{\pi}_{\mathrm{cot}}(y,z\given x).
+\label{eq:cot-marginal}
+\end{equation}
+This is the precise sense in which CoT replaces a direct jump by a path integral over latent rationales \cite{phan2023training,hu2024amortizing}. The point is not that isolated rationale tokens are meaningful in themselves. The point is that CoT reshapes the distribution over complete rationale-answer sequences.
+
+The chain rule for relative entropy makes the benefit of this factorization explicit.
+Let $p^\star(y,z\given x)$ be any target distribution on the same latent variables.
+Then
+\begin{align}
+\KL\!\left(p^\star \,\middle\|\, \tilde{\pi}_{\mathrm{cot}}\right)
+&=
+\KL\!\left(p^\star(z_1\given x)\,\middle\|\,\pi(z_1\given x)\right) \nonumber \\
+&\quad + \sum_{k=2}^{K}\E_{p^\star}\!\left[
+\KL\!\left(
+p^\star(z_k\given x,z_{<k})
+\middle\|
+\pi(z_k\given x,z_{<k})
+\right)\right] \nonumber \\
+&\quad + \E_{p^\star}\!\left[
+\KL\!\left(
+p^\star(y\given x,z)
+\middle\|
+\pi(y\given x,z)
+\right)\right].
+\label{eq:kl-chain}
+\end{align}
+Equation \eqref{eq:kl-chain} does not guarantee that CoT always helps.
+It says something more precise.
+If the inserted latent states turn a hard global task into a sequence of locally easier conditional predictions, then the total mismatch is controlled by the sum of those local conditional mismatches.
+Under that condition, CoT moves the proposal toward the target by replacing one difficult transport with several smaller moves.
+
+An information-theoretic formulation leads to the same conclusion at sequence level. Let $X$ denote the prompt, let $Z$ denote the rationale subsequence, and let $Y$ denote the final answer subsequence under a target law $p^\star(y,z\given x)$ with finite answer alphabet $\mathcal{A}$. Then
+\begin{equation}
+H(Y\given X,Z)=H(Y\given X)-I(Y;Z\given X),
+\label{eq:cot-cmi}
+\end{equation}
+so any rationale subsequence helps only to the extent that it carries answer-relevant information beyond the prompt. If $\hat Y=\delta(X,Z)$ is any decoder of the final answer from the prompt and rationale, Fano's inequality implies \cite{cover2006elements}
+\begin{equation}
+\Pr(\hat Y\neq Y)\ge \frac{H(Y\given X,Z)-1}{\log |\mathcal{A}|}
+=
+\frac{H(Y\given X)-I(Y;Z\given X)-1}{\log |\mathcal{A}|}.
+\label{eq:cot-fano}
+\end{equation}
+Equation \eqref{eq:cot-fano} does not prove that a finite model will improve just by emitting a longer rationale. It shows instead why CoT \emph{could} help: a rationale subsequence with large conditional mutual information $I(Y;Z\given X)$ lowers the residual uncertainty of the answer and therefore weakens the information-theoretic lower bound on achievable answer error. If the generated rationale is mostly redundant or noisy so that $I(Y;Z\given X)\approx 0$, no comparable gain should be expected.
+
+The free-energy view makes the same point geometrically at sequence level.
+A useful rationale token is not valuable because it looks plausible in isolation. A useful rationale subsequence is valuable because the complete rationale-answer sequence $(z,y)$ lies in, or remains connected to, a lower-free-energy basin than a direct short answer would.
+CoT externalizes part of the continuation computation into the token stream by replacing one short sequence with a longer semantically structured one.
+It therefore spends extra serial compute to redirect mass toward complete low-free-energy sequences, and only secondarily to improve local token prediction.
+
+\subsection{Self-consistency, tree search, and SMC}
+
+Once the latent path formulation in Eq.~\eqref{eq:cot-factorization} is in place, broader families of scaffolds follow naturally.
+ Self-consistency samples several CoT paths and aggregates them at the answer level \cite{wang2022self}.
+ If the sampled rationales explore genuinely different basins, the answer-level marginal in Eq.~\eqref{eq:cot-marginal} is estimated more accurately.
+ If the samples are highly correlated, the apparent width adds little effective information.
+
+Tree-of-Thought and related branching methods go one step further.
+ They evaluate prefixes, assign weights to partial continuations, and allocate compute to the branches that appear to have lower continuation free energy \cite{yao2023tree,mo2023uncertain,zhou2024lats}.
+ In explicitly probabilistic variants, the scaffold samples particles, reweights them by approximate future value estimates, and resamples the survivors, exactly as in twisted SMC for controlled language generation \cite{zhao2024probabilistic,loula2025syntactic}.
+ Here the main challenge is not conceptual but statistical: if prefix scores are badly calibrated, the algorithm collapses weight onto the wrong branches and the transport becomes biased.
+
+This broader perspective helps separate three levels of inference-time control.
+ Prompt-only transport leaves autoregressive ancestral sampling mostly intact while modifying the prompt-conditioned proposal.
+ Branching and particle methods add explicit marginalization or resampling on top of that proposal.
+ Full constrained-decoding methods such as CGMH, COLD, and MuCoLa go further still by constructing a Markov chain or Langevin sampler that targets the constrained distribution directly \cite{miao2019cgmh,qin2022cold,kumar2022gradient}.
+ That last category is the clearest evidence that decoding itself can be cast as Monte Carlo inference, but it typically requires stronger access to the constraint function and often departs from ordinary left-to-right decoding.
+
+\subsection{Abstention, information gathering, and delayed commitment}
+
+A useful consequence of the stochastic-steering view is that a rational agent should sometimes abstain from an immediate answer and instead gather more information.
+ Under the reference-process perspective, the base model defines forward dynamics over prefixes.
+ If posterior mass over high-value basins remains multimodal, forcing an immediate terminal answer can require a large KL deformation away from those forward dynamics.
+ In that regime, an information-gathering action such as retrieval, tool use, or an additional reasoning branch can be cheaper than premature commitment because it changes the state before the final transport is attempted.
+
+This logic is strict in endpoint-conditioned Schr\"odinger bridges and suggestive more generally.
+ Bernton \textit{et al.} formulate the bridge problem as finding the process closest to a reference Markov chain while matching a desired terminal distribution \cite{bernton2019schr}.
+ In our setting, abstention corresponds to continuing the forward process for another step before enforcing a sharp terminal commitment.
+ For path-dependent verifiers, the same interpretation is no longer exact, but the control intuition survives: defer commitment while the candidate basins are still poorly separated, and gather information that can lower the future transport cost.
+
+The same design rule appears in path-integral control.
+ When noise is high or the horizon is long, the optimal controller need not commit early to one narrow route; it can remain in an intermediate region until symmetry breaks and one basin becomes decisively preferable \cite{kappen2005path}.
+ For AI agents, abstention is therefore not indecision.
+ It is a control action that is justified when predictive entropy is high, the verifier ROC is not yet strong enough to separate the branches, and a cheap information action can improve coverage or reduce future sub-optimality \cite{mukherjee2025test}.
+ Immediate answering is preferable only once the expected value of further information falls below its cost.
+
+\section{Illustrative examples of how prompting moves the proposal}
+
+The proposal-transport view is easiest to read on simple reasoning tasks.
+ Consider a prompt $x$ that asks for the total price of several items, where the correct answer requires identifying subtotals and then adding them.
+ The target distribution is sharply concentrated on responses that apply the correct operation sequence.
+ In zero-shot prompting, the model must move directly from $x$ to a final answer string.
+ That leaves substantial proposal mass on shallow heuristics, such as adding the wrong pair of numbers or copying a salient quantity from the prompt.
+
+Now append one or two worked examples that follow the desired solution pattern.
+ Few-shot prompting changes the proposal before decoding begins.
+ Prefixes that start with a decomposition into subtotals become more probable, so the correct answer basin becomes easier to reach.
+ The target has not changed; the proposal has moved.
+
+CoT pushes the same idea further by introducing explicit latent states.
+ A stylized completion might first identify the notebook subtotal, then the pen subtotal, and only then produce the final sum.
+ Each intermediate state rules out a family of incompatible continuations.
+ The correct answer token therefore sits downstream of a prefix with lower continuation free energy than the prefixes that lead to arithmetic slips.
+ In that sense, CoT gets closer to the target not by magic but by breaking the transport into smaller moves that the model can approximate more reliably.
+
+The same logic scales to more difficult tasks.
+ For theorem proving, the useful latent states may be variable declarations, intermediate lemmas, or proof strategies.
+ For program synthesis, they may be test cases, algorithm sketches, or tool outputs.
+ In each case, the intervention helps only to the extent that it moves proposal mass toward prefixes from which the verifier-weighted target remains reachable.
+
+\section{Discussion and limitations}
+
+The main claim of this paper is structural.
+ We do not claim that language models literally instantiate physical diffusions in semantic space, nor that every prompt can be assigned a unique ground-truth reward.
+ The useful statement is narrower: once inference-time behavior is written as Eq.~\eqref{eq:target-dist}, the same log-partition and soft-value mathematics that appears in statistical mechanics and maximum-entropy control also organizes prompt engineering.
+
+That narrowness matters.
+ First, the target is only as good as the verifier that defines it.
+ If the reward is provided by an imperfect judge, then the induced free-energy landscape is judge-relative rather than truth-relative.
+ Second, few-shot and CoT prompts can change task semantics as well as improve inference.
+ An exemplar may import a hidden bias; a rationale may lock the system into an unfortunate decomposition.
+ Third, the benefit of CoT is conditional rather than universal.
+ Equation \eqref{eq:kl-chain} shows that inserted latent states help when they reduce local conditional mismatch.
+ They do not create arbitrary new support.
+
+The framework nevertheless suggests several concrete design rules.
+ Predictive entropy and prefix-level uncertainty should determine when to spend more inference-time compute, because they are proxies for poor continuation value estimates.
+ Prefix scorers should be trained or calibrated as estimators of future verifier-weighted mass, not merely of local fluency.
+ When uncertainty remains high and a cheap information action is available, abstention should be treated as a legitimate control choice rather than as a failure to answer.
+ Finally, actor and critic roles should be separated whenever possible: the system that proposes tokens need not be the same system that estimates continuation free energy.
+
+\section{Conclusion}
+
+Prompting techniques can be described without anthropomorphic language.
+ A deployed language model defines a proposal distribution on $\cY$.
+ A verifier or reward defines a target concentrated on high-reward, low-free-energy responses.
+ Inference-time prompting then becomes the problem of moving probability mass from the proposal toward that target under finite compute.
+
+Within this picture, zero-shot prompting leaves the proposal almost untouched, few-shot prompting changes the initial condition of the proposal, and chain-of-thought introduces latent intermediate states that decompose a hard transport into smaller conditional moves.
+ Self-consistency and tree-search methods extend the same logic by marginalizing, reweighting, and resampling multiple completions.
+ The reward of this formulation is conceptual clarity: it tells us when prompting can help, what object it is approximating, and why no amount of selection can rescue a target that the proposal never reaches.
+
+\bibliographystyle{apsrev4-2}
+\bibliography{prompting_as_proposal_transport_refs}
+
+\end{document}
