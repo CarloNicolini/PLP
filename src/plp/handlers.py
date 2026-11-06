@@ -1,16 +1,20 @@
 """
 PLP Handlers.
 
-Program transformers for trace manipulation, replay, blocking, and interventions.
-Inspired by Pyro's effect handlers.
+Program transformers for trace manipulation, replay, blocking, interventions,
+and seeding.  Inspired by Pyro's effect handlers.
 """
 
+import random
 from contextvars import ContextVar
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterator, TypeVar
+from typing import TYPE_CHECKING, Any, Iterator, TypeVar
 
 from .state import TraceEvent
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .state import PLPState
 
 T = TypeVar("T", bound="HandlerContext")
 
@@ -162,6 +166,50 @@ class BlockContext(HandlerContext):
 def get_block_context() -> BlockContext | None:
     """Get the active block context, if any."""
     return _get_handler("block")
+
+
+def is_blocked(site_name: str) -> bool:
+    """Return True iff an active :class:`BlockContext` blocks ``site_name``.
+
+    Increments the context's ``block_count`` as a side-effect, matching
+    the historical behaviour of the hand-rolled checks in
+    :func:`plp.primitives.observe` and :func:`plp.primitives.factor`.
+    """
+    ctx = get_block_context()
+    if ctx is None or not ctx.is_blocked(site_name):
+        return False
+    ctx.block_count += 1
+    return True
+
+
+def record_blocked_event(
+    state: "PLPState",
+    site_name: str,
+    kind: str,
+    output: str = "",
+    extra_meta: dict[str, Any] | None = None,
+) -> "PLPState":
+    """Produce a copy of ``state`` with a trace entry marking a skipped site.
+
+    ``kind`` is one of ``"observe"`` or ``"factor"``; it sets the matching
+    key in ``meta`` (``"observe": True`` or ``"factor": True``) plus a
+    ``"blocked": True`` flag so downstream analysis can filter these out.
+    """
+    new_state = state.copy()
+    meta: dict[str, Any] = {kind: True, "blocked": True}
+    if kind == "factor":
+        meta["log_factor"] = 0.0
+    if extra_meta:
+        meta.update(extra_meta)
+    new_state.trace.append(
+        TraceEvent(
+            primitive=site_name,
+            prompt=f"({kind} - blocked)",
+            output=output,
+            meta=meta,
+        )
+    )
+    return new_state
 
 
 @contextmanager
@@ -332,3 +380,77 @@ def check_handlers(site_name: str) -> tuple[str | None, str]:
         return "", "block"
 
     return None, "none"
+
+
+# ============================================================
+# Seed Handler (deterministic RNGs per scope)
+# ============================================================
+
+
+@dataclass
+class SeedContext(HandlerContext):
+    """
+    Context for reproducible stochastic inference.
+
+    Within a ``seed(k)`` block, calls to :func:`rng_for` return a
+    deterministic :class:`random.Random` keyed by ``(seed, scope)``. This
+    lets independent subsystems (resampling, SPRT, future MH kernels)
+    share a single user-facing seed without fighting over a global RNG.
+
+    Attributes:
+        seed: The seed supplied by the user.
+        _rng_cache: Per-scope cached RNGs so multiple calls to
+            ``rng(scope)`` return the same generator and therefore a
+            consistent sequence of draws.
+    """
+
+    seed: int = 0
+    _rng_cache: dict[str, random.Random] = field(default_factory=dict)
+
+    def rng(self, scope: str = "default") -> random.Random:
+        if scope not in self._rng_cache:
+            # Derive a stable sub-seed from (seed, scope) using a salted
+            # byte encoding so we don't depend on Python's randomised
+            # string hash between processes.
+            payload = f"{self.seed}:{scope}".encode("utf-8")
+            self._rng_cache[scope] = random.Random(payload)
+        return self._rng_cache[scope]
+
+
+def get_seed_context() -> SeedContext | None:
+    """Return the active :class:`SeedContext`, if any."""
+    return _get_handler("seed")
+
+
+@contextmanager
+def seed(k: int) -> Iterator[SeedContext]:
+    """
+    Context manager for reproducible stochastic inference.
+
+    Any PLP code that draws randomness via :func:`rng_for` inside this
+    block sees deterministic streams keyed by ``(k, scope)``. Nesting
+    ``seed`` blocks stacks; the innermost wins.
+
+    Example:
+        >>> with seed(42):
+        ...     particles = engine.run(graph)
+    """
+    ctx = SeedContext(name="seed", seed=int(k))
+
+    with _generic_handler("seed", ctx) as context:
+        yield context
+
+
+def rng_for(scope: str = "default") -> random.Random:
+    """
+    Return the RNG to use for a given scope.
+
+    Honours the active :class:`SeedContext` if one is set (deterministic);
+    otherwise returns a fresh, unseeded :class:`random.Random` that
+    behaves exactly like the module-level ``random`` did before this
+    handler existed.
+    """
+    ctx = get_seed_context()
+    if ctx is not None:
+        return ctx.rng(scope)
+    return random.Random()

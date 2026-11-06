@@ -14,7 +14,7 @@ TEST_MODEL = "openai/gpt-4.1-mini"
 
 
 def _load_test_env() -> None:
-    """Load local environment variables for live LLM tests."""
+    """Load ``.env`` so ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL`` are available."""
     project_root = Path(__file__).resolve().parents[1]
     load_dotenv(project_root / ".env", override=False)
     load_dotenv(override=False)
@@ -22,7 +22,7 @@ def _load_test_env() -> None:
 
 @pytest.fixture(scope="session")
 def llm() -> PLPChatClient:
-    """Provide a live OpenAI-compatible client for tests."""
+    """Live OpenAI-compatible client (uses ``OPENAI_BASE_URL`` when set)."""
     _load_test_env()
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:

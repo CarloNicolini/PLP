@@ -20,6 +20,7 @@ def sample(
     name: str | None = None,
     update_state: Callable[[PLPState, str], None] | None = None,
     system_prompt: str | None = None,
+    parents: list[str] | tuple[str, ...] = (),
 ):
     """
     Decorator for LLM-based sample primitives.
@@ -39,21 +40,29 @@ def sample(
         llm: The LLM client to use for generation
         name: Optional name for this primitive (defaults to function name)
         update_state: Optional callback to update state.vars with the output
+        system_prompt: Optional system message prepended to the prompt
+        parents: Names of other sample sites this one reads from state.vars.
+            Declares the directed edges in the ChainGraph. Empty by default
+            (a root site). Cyclic declarations are permitted — they induce
+            a Case-B (MRF) graph requiring Gibbs iteration.
 
     Raises:
         TypeError: If llm does not provide an 'invoke' method
         TypeError: If update_state is not callable
 
     Example:
-        >>> @sample(llm, name="arithmetic")
+        >>> @sample(llm, name="arithmetic", parents=["reasoning"])
         ... def solve_arithmetic(state: PLPState, problem: str) -> str:
-        ...     return f"Solve this arithmetic problem: {problem}. Reply with just the number."
+        ...     r = state.vars.get("reasoning", "")
+        ...     return f"Given {r}, answer: {problem}"
         ...
         >>> state, answer = solve_arithmetic(PLPState(), "2+2")
     """
     ensure_llm(llm)
     if update_state is not None and not callable(update_state):
         raise TypeError(f"update_state must be callable, got {type(update_state)}")
+
+    parents_tuple = tuple(parents)
 
     def decorator(fn: Callable[..., str]):
         prim_name = name or fn.__name__
@@ -74,6 +83,10 @@ def sample(
 
             return new_state, output
 
+        # Attach graph metadata so ChainGraph builders can introspect.
+        wrapped.__plp_site_name__ = prim_name  # type: ignore[attr-defined]
+        wrapped.__plp_parents__ = parents_tuple  # type: ignore[attr-defined]
+        wrapped.__plp_kind__ = "sample"  # type: ignore[attr-defined]
         return wrapped
 
     return decorator
@@ -84,6 +97,7 @@ def asample(
     name: str | None = None,
     update_state: Callable[[PLPState, str], None] | None = None,
     system_prompt: str | None = None,
+    parents: list[str] | tuple[str, ...] = (),
 ):
     """
     Async decorator for LLM-based sample primitives (uses ``ainvoke``).
@@ -93,7 +107,13 @@ def asample(
     it composes with :func:`plp.plate_amap` and other async plate helpers.
 
     Args:
-        llm: Object with ``async def ainvoke(messages) -> response`` (e.g. :class:`plp.client.PLPChatClient`)
+        llm: Object with ``async def ainvoke(messages) -> response``
+        name: Optional site name (defaults to fn.__name__)
+        update_state: Optional callback to update state.vars with the output
+        system_prompt: Optional system message
+        parents: Names of other sample sites this one reads from state.vars.
+            See :func:`sample` for details. Cyclic parent declarations across
+            sites produce a Case-B (MRF) graph.
 
     Raises:
         TypeError: If ``llm`` does not provide a callable ``ainvoke``
@@ -102,6 +122,8 @@ def asample(
     ensure_async_llm(llm)
     if update_state is not None and not callable(update_state):
         raise TypeError(f"update_state must be callable, got {type(update_state)}")
+
+    parents_tuple = tuple(parents)
 
     def decorator(fn: Callable[..., str]):
         prim_name = name or fn.__name__
@@ -122,6 +144,9 @@ def asample(
 
             return new_state, output
 
+        wrapped.__plp_site_name__ = prim_name  # type: ignore[attr-defined]
+        wrapped.__plp_parents__ = parents_tuple  # type: ignore[attr-defined]
+        wrapped.__plp_kind__ = "asample"  # type: ignore[attr-defined]
         return wrapped
 
     return decorator
@@ -161,23 +186,16 @@ def observe(name: str | None = None):
 
         @wraps(fn)
         def wrapped(state: PLPState, *args, **kwargs) -> PLPState:
-            # Check if blocked
-            from .handlers import get_block_context
+            from .handlers import is_blocked, record_blocked_event
 
-            block_ctx = get_block_context()
-            if block_ctx and block_ctx.is_blocked(obs_name):
-                block_ctx.block_count += 1
-                # Skip observation entirely
-                new_state = state.copy()
-                new_state.trace.append(
-                    TraceEvent(
-                        primitive=obs_name,
-                        prompt="(observe - blocked)",
-                        output="skipped",
-                        meta={"observe": True, "passed": True, "blocked": True},
-                    )
+            if is_blocked(obs_name):
+                return record_blocked_event(
+                    state,
+                    obs_name,
+                    "observe",
+                    output="skipped",
+                    extra_meta={"passed": True},
                 )
-                return new_state
 
             ok = fn(state, *args, **kwargs)
 
@@ -203,6 +221,7 @@ def factor(
     name: str | None = None,
     scale: float = 1.0,
     mask: Callable[[PLPState], bool] | None = None,
+    parents: list[str] | tuple[str, ...] | None = None,
 ):
     """
     Decorator for soft factors (log-weights).
@@ -217,22 +236,20 @@ def factor(
         name: Optional name for this factor (defaults to function name)
         scale: Multiplier for the log-factor (default 1.0)
         mask: Optional predicate - if returns False, factor is skipped
+        parents: Names of sample sites this factor reads. These form the
+            clique of the factor in the chain graph. If None, parents are
+            inferred from the function's signature (all parameters after
+            ``state``), matching the legacy FactorGraph behaviour.
 
     Raises:
         TypeError: If mask is not callable
         ValueError: If scale is not a finite number
 
     Example:
-        >>> @factor(name="coherence", scale=0.1)
+        >>> @factor(name="coherence", scale=0.1, parents=["text"])
         ... def score_coherence(state: PLPState, text: str) -> float:
-        ...     # Scale down so it doesn't dominate hard constraints
         ...     return some_coherence_score(text)
-
-        >>> @factor(name="brevity", mask=lambda s: s.vars.get("mode") == "summary")
-        ... def penalize_length(state: PLPState, text: str) -> float:
-        ...     return -0.01 * len(text)  # Only active in summary mode
     """
-    # Validate inputs
     if mask is not None and not callable(mask):
         raise TypeError(f"mask must be callable, got {type(mask)}")
     if not isinstance(scale, (int, float)) or not (
@@ -242,27 +259,27 @@ def factor(
 
     def decorator(fn: Callable[..., float]):
         fac_name = name or fn.__name__
+        inferred = False
+        if parents is None:
+            import inspect
+            sig = inspect.signature(fn)
+            params = list(sig.parameters)
+            if params and params[0] == "state":
+                params = params[1:]
+            parents_tuple = tuple(params)
+            inferred = True
+        else:
+            parents_tuple = tuple(parents)
 
         @wraps(fn)
         def wrapped(state: PLPState, *args, **kwargs) -> PLPState:
-            # Check if blocked
-            from .handlers import get_block_context
+            from .handlers import is_blocked, record_blocked_event
 
-            block_ctx = get_block_context()
-            if block_ctx and block_ctx.is_blocked(fac_name):
-                block_ctx.block_count += 1
-                new_state = state.copy()
-                new_state.trace.append(
-                    TraceEvent(
-                        primitive=fac_name,
-                        prompt="(factor - blocked)",
-                        output="0.0",
-                        meta={"factor": True, "log_factor": 0.0, "blocked": True},
-                    )
+            if is_blocked(fac_name):
+                return record_blocked_event(
+                    state, fac_name, "factor", output="0.0",
                 )
-                return new_state
 
-            # Check mask
             if mask is not None and not mask(state):
                 new_state = state.copy()
                 new_state.trace.append(
@@ -295,6 +312,10 @@ def factor(
             new_state.trace.append(event)
             return new_state
 
+        wrapped.__plp_site_name__ = fac_name  # type: ignore[attr-defined]
+        wrapped.__plp_parents__ = parents_tuple  # type: ignore[attr-defined]
+        wrapped.__plp_parents_inferred__ = inferred  # type: ignore[attr-defined]
+        wrapped.__plp_kind__ = "factor"  # type: ignore[attr-defined]
         return wrapped
 
     return decorator

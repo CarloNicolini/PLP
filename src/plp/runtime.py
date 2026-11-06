@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._llm import LLMLike, invoke_llm, llm_name, ainvoke_llm
+from ._llm import (
+    LLMLike,
+    ainvoke_llm_with_attempts,
+    invoke_llm_with_attempts,
+    llm_name,
+)
 from .handlers import check_handlers
 from .state import PLPState, TraceEvent
 
@@ -44,16 +49,20 @@ def run_prompt(
     """
     ensure_llm(llm)
     cached_output, handler_used = check_handlers(name)
-    output = (
-        cached_output
-        if cached_output is not None
-        else invoke_llm(llm, prompt, system_prompt=system_prompt)
-    )
+    if cached_output is not None:
+        output = cached_output
+        attempts = 0
+    else:
+        output, attempts = invoke_llm_with_attempts(
+            llm, prompt, system_prompt=system_prompt
+        )
 
     new_state = state.copy()
     event_meta: dict[str, Any] = {"llm": llm_name(llm)}
     if handler_used != "none":
         event_meta["handler"] = handler_used
+    if attempts:
+        event_meta["llm_attempts"] = attempts
     if meta:
         event_meta.update(meta)
 
@@ -85,16 +94,20 @@ async def arun_prompt(
     """
     ensure_async_llm(llm)
     cached_output, handler_used = check_handlers(name)
-    output = (
-        cached_output
-        if cached_output is not None
-        else await ainvoke_llm(llm, prompt, system_prompt=system_prompt)
-    )
+    if cached_output is not None:
+        output = cached_output
+        attempts = 0
+    else:
+        output, attempts = await ainvoke_llm_with_attempts(
+            llm, prompt, system_prompt=system_prompt
+        )
 
     new_state = state.copy()
     event_meta: dict[str, Any] = {"llm": llm_name(llm)}
     if handler_used != "none":
         event_meta["handler"] = handler_used
+    if attempts:
+        event_meta["llm_attempts"] = attempts
     if meta:
         event_meta.update(meta)
 
@@ -107,4 +120,3 @@ async def arun_prompt(
         )
     )
     return new_state, output
-
