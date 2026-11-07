@@ -274,12 +274,16 @@ def plate(
         subsample_size: Optional mini-batch size for subsampling
         dim: Dimension for plate (for tensor compatibility, default -1)
 
-    Example (context manager):
+    Examples:
+
+    Use a context manager to iterate over the plate::
+
         >>> with plp.plate("candidates", 5) as p:
         ...     for i in p:
         ...         ...
 
-    Example (fluent API):
+    Use the fluent API to run the sample function over the plate::
+
         >>> states, outputs = plp.plate("candidates", 5).map(propose_fn, problem)
     """
     return PlateRunner(name=name, size=size, subsample_size=subsample_size, dim=dim)

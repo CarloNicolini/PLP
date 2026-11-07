@@ -1,16 +1,20 @@
 # Inference API
 
-```{automodule} plp.inference
-:members:
-:show-inheritance:
+```{eval-rst}
+.. automodule:: plp.inference
+   :members:
+   :show-inheritance:
 ```
 
-```{automodule} plp.inference.graph
-:members:
-:show-inheritance:
+```{eval-rst}
+.. automodule:: plp.inference.graph
+   :members:
+   :exclude-members: ChainGraph
+   :show-inheritance:
 ```
 
-```{automodule} plp.inference.engines.select
-:members:
-:show-inheritance:
+```{eval-rst}
+.. automodule:: plp.inference.engines.select
+   :members:
+   :show-inheritance:
 ```

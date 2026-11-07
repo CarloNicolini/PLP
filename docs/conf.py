@@ -22,3 +22,4 @@ exclude_patterns += [
     "plp_theoretical_foundations.md",
 ]
 autodoc_member_order = "bysource"
+napoleon_use_ivar = True

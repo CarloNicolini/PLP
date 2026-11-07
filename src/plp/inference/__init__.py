@@ -10,14 +10,14 @@ and Phi is the potential (induced by @factor cliques).
 
 Depending on the declared structure the joint can be:
 
-  — a directed Bayes net if parents form a DAG and there are no
-  factors. Exact samples come from a single forward pass.
+  - a directed Bayes net if parents form a DAG and there are no
+    factors. Exact samples come from a single forward pass.
 
   - an MRF if parents form a cycle (sites read each other across
-  rounds). Samples come from Gibbs iteration.
+    rounds). Samples come from Gibbs iteration.
 
-  — a chain graph in general: some parts are directed, others are
-  coupled undirectedly by factor cliques or parent cycles.
+  - a chain graph in general: some parts are directed, others are
+    coupled undirectedly by factor cliques or parent cycles.
 
 This package provides:
 

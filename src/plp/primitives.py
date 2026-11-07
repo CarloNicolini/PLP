@@ -25,9 +25,8 @@ def sample(
     """
     Decorator for LLM-based sample primitives.
 
-    The wrapped function must have signature:
-        fn(state: PLPState, *args, **kwargs) -> str
-    and should return the prompt string to send to the LLM.
+    The wrapped function must have signature
+    ``fn(state: PLPState, *args, **kwargs) -> str``. It returns the prompt string to send to the LLM.
 
     This decorator:
         - Checks for active handlers (replay, block, do, condition)
@@ -156,8 +155,8 @@ def observe(name: str | None = None):
     """
     Decorator for hard constraints (observe).
 
-    The wrapped function must have signature:
-        fn(state: PLPState, *args, **kwargs) -> bool
+    The wrapped function must have signature
+    ``fn(state: PLPState, *args, **kwargs) -> bool``.
 
     This decorator:
         - Calls fn to get a Boolean
@@ -226,8 +225,8 @@ def factor(
     """
     Decorator for soft factors (log-weights).
 
-    The wrapped function must have signature:
-        fn(state: PLPState, *args, **kwargs) -> float
+    The wrapped function must have signature
+    ``fn(state: PLPState, *args, **kwargs) -> float``.
 
     It should return a log-factor that will be scaled and added to log_weight.
     Positive values favor this trace; negative values penalize it.

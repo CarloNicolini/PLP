@@ -33,6 +33,18 @@ jobs:
           --ignore=tests/test_soft_nand_circuit.py
       - name: Build documentation with warnings as errors
         run: make docs-strict
+      - name: Verify public API entries rendered
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+          import plp
+
+          html = Path("docs/_build/html/api/core.html").read_text(encoding="utf-8")
+          missing = [name for name in plp.__all__ if f'id="plp.{name}"' not in html]
+          if missing:
+              raise SystemExit(f"Missing API documentation: {', '.join(missing)}")
+          print(f"Rendered all {len(plp.__all__)} public API entries.")
+          PY
       - name: Build and validate distributions
         run: |
           uv run python -m build
