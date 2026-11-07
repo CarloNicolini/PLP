@@ -1,138 +1,106 @@
 # Probabilistic Language Programming (PLP)
 
-PLP is a small, semantics-first library for treating LLM calls as probabilistic program sites. The package is intentionally narrow: it focuses on traces, primitive operations, plate-style repetition, and a minimal reliability wrapper.
+PLP is a Python library for treating language-model calls as probabilistic program
+sites. Decorated functions produce traces; hard constraints and soft factors score
+those traces; graph-based inference compares repeated runs.
 
-For the theoretical framing, see [`docs/plp_theoretical_foundations.md`](docs/plp_theoretical_foundations.md).
-
-## Public API
-
-Top-level `plp` exports only the core surface:
-
-- State and trace: `PLPState`, `TraceEvent`
-- LLM protocols and client: `LLMLike`, `AsyncLLMLike`, `PLPChatClient`, `ChatOpenAI`
-- LLM call helpers: `invoke_llm`, `ainvoke_llm`, `normalize_chat_messages`
-- Primitives: `sample`, `asample`, `observe`, `factor`, `plate`
-- Plate runners: `plate(...).map(...)`, `plate(...).reduce(...)`, `plate(...).amap(...)`, `plate(...).areduce(...)`
-- Reliability wrapper: `guarantee`
-
-There is no high-level prompt/session API, agent abstraction, or TextGrad layer in the current package.
+Requires **Python 3.12 or newer**. PLP is experimental: weighted particles and
+reliability selection depend on the model, scoring functions, and sampling assumptions.
+They do not certify that generated answers are true.
 
 ## Installation
 
-```bash
-pip install plp
-```
-
-Set `OPENAI_API_KEY` in the environment, then construct a client explicitly:
-
-```python
-import plp
-
-llm = plp.ChatOpenAI(model="gpt-4.1-mini", temperature=0.3)
-```
-
-## Core Example
-
-Define a stochastic site with `@sample`, then inspect the resulting trace.
-
-```python
-import plp
-
-llm = plp.ChatOpenAI(model="gpt-4.1-mini", temperature=0.3)
-
-
-@plp.sample(llm, name="solver")
-def solve(state: plp.PLPState, question: str) -> str:
-    return f"Answer briefly: {question}"
-
-
-state = plp.PLPState()
-new_state, answer = solve(state, "What is probabilistic programming?")
-
-print(answer)
-print(new_state.trace[-1])
-```
-
-`TraceEvent` records the primitive name, prompt, output, and metadata for each step.
-
-## Primitive Semantics
-
-- `sample` / `asample`: draw a string from an LLM-conditioned distribution and append a trace event.
-- `observe`: apply a hard Boolean constraint by setting `log_weight = -inf` on failure.
-- `factor`: apply a soft log-weight update.
-- `plate`: represent conditionally independent repetition.
-- `guarantee`: repeat a stochastic subcomputation and select a representative answer under a fixed error budget.
-
-## Plate and Concurrency
-
-PLP supports both sequential and concurrent plate execution.
-
-For simple repeated runs:
-
-```python
-states, outputs = plp.plate("candidates", 5).map(
-    solve,
-    "Why use plate?",
-    init_state=plp.PLPState(),
-)
-```
-
-For async workloads:
-
-```python
-import asyncio
-import plp
-
-llm = plp.ChatOpenAI(model="gpt-4.1-mini", temperature=0.3)
-
-
-@plp.asample(llm, name="async_solver")
-def solve_async(state: plp.PLPState, question: str) -> str:
-    return f"Answer briefly: {question}"
-
-states, outputs = asyncio.run(
-    plp.plate("candidates", 4).amap(
-        solve_async,
-        "Why use plate?",
-        max_concurrency=4,
-    )
-)
-```
-
-`plate(...).amap(...)` and `plate(...).areduce(...)` use task-local context plus an `asyncio.Semaphore`, so concurrent async runs do not share plate state accidentally.
-
-## Reliability Example
-
-```python
-import plp
-
-llm = plp.ChatOpenAI(model="gpt-4.1-mini", temperature=0.3)
-
-
-@plp.sample(llm, name="step_solver")
-def solve_step(state: plp.PLPState, task: str) -> str:
-    return f"Compute the result for: {task}. Reply with just the answer."
-
-
-def judge(a: str, b: str) -> str:
-    return "a" if len(a) <= len(b) else "b"
-
-
-@plp.guarantee(llm=llm, eps=1e-3, judge_fn=judge)
-def robust_step(state: plp.PLPState, task: str) -> tuple[plp.PLPState, str]:
-    return solve_step(state, task)
-```
-
-## Notes
-
-- Handlers such as `replay`, `block`, `do`, and `condition` still exist in `plp.handlers`, but they are supporting machinery rather than the advertised top-level API.
-- The library currently assumes OpenAI-compatible chat clients at the transport boundary.
-
-## Development
-
-Run tests with:
+Install this repository in a virtual environment:
 
 ```bash
+python -m venv .venv
 source .venv/bin/activate
-pytest
+python -m pip install "git+https://github.com/CarloNicolini/PLP.git"
 ```
+
+On Windows, activate with `.venv\Scripts\activate`. The current dependency set
+includes PyTorch and Transformers, so allow space and time for those downloads.
+
+## Offline quickstart
+
+This complete example requires no credentials or model downloads:
+
+```python
+from types import SimpleNamespace
+import plp
+
+
+class ScriptedLLM:
+    def invoke(self, messages):
+        return SimpleNamespace(content="Paris")
+
+
+@plp.sample(ScriptedLLM(), name="capital")
+def capital(state: plp.PLPState, country: str) -> str:
+    return f"Name the capital of {country}."
+
+
+state, answer = capital(plp.PLPState(), "France")
+print(answer)                    # Paris
+print(state.trace[-1].primitive) # capital
+print(state.log_weight)          # 0.0
+```
+
+Continue with the [quickstart](docs/getting-started/quickstart.md) to store answers
+and add evidence with `observe` and `factor`.
+
+## Core concepts and API
+
+- `PLPState` and `TraceEvent` hold state, log weights, and execution history.
+- `sample` / `asample` call a model and append a trace event.
+- `observe` rejects a trace on a failed Boolean constraint; `factor` adds a log score.
+- `plate` runs repeated computations, including async execution with bounded concurrency.
+- `ChainGraph` and `choose_engine` expose graph structure and inference selection.
+- `guarantee` repeats a computation and selects an answer under its statistical assumptions.
+- `replay`, `block`, `do`, `condition`, and `seed` control execution.
+
+See the [API reference sources](docs/api/index.md) and
+[inference guide](docs/inference/index.md) for details and available engines.
+
+## Hosted models
+
+Set `OPENAI_API_KEY`, then replace `ScriptedLLM()` with an explicit client:
+
+```python
+llm = plp.ChatOpenAI(model="gpt-4.1-mini", temperature=0.3)
+```
+
+`OPENAI_BASE_URL` selects an OpenAI-compatible endpoint; choose a model identifier
+supported by that provider. Live requests may incur charges. See
+[installation and environment variables](docs/getting-started/installation.md) and
+the [live LLM guide](docs/getting-started/live-llm.md).
+
+## Documentation
+
+Start with [installation](docs/getting-started/installation.md), the
+[offline quickstart](docs/getting-started/quickstart.md), and
+[examples](docs/examples/index.md). The [scientific context](docs/theory/index.md)
+explains trace semantics, assumptions, and failure modes. The longer
+[theoretical foundations](docs/plp_theoretical_foundations.md) remain a research reference.
+
+## Development and validation
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
+
+```bash
+git clone https://github.com/CarloNicolini/PLP.git
+cd PLP
+uv sync --all-groups
+uv run pytest tests/ \
+  --ignore=tests/test_circuit_controller_live.py \
+  --ignore=tests/test_soft_nand_circuit.py
+make docs-strict
+uv run python -m build
+uv run twine check dist/*
+```
+
+Tests using the live `llm` fixture skip without `OPENAI_API_KEY`; see
+[tests/README.md](tests/README.md) for details and the excluded reliability example.
+Use `make docs-serve` for a local documentation preview. Documentation changes
+should pass `make docs-strict`; keep examples runnable offline unless explicitly
+labeled as live, and update the API and installation guides when behavior changes.

@@ -8,3 +8,14 @@ Run (from repo root, with venv activated):
 ```bash
 pytest tests/
 ```
+
+The default configuration excludes `test_reliability_example.py`, a live experiment.
+Currently `test_circuit_controller_live.py` and `test_soft_nand_circuit.py` import
+example modules absent from this checkout (`soft_nand_circuit`). Until those examples are restored, run the remaining suite with:
+
+```bash
+uv run pytest tests/ --ignore=tests/test_circuit_controller_live.py --ignore=tests/test_soft_nand_circuit.py
+```
+
+Packaging and documentation checks are described in the root README. They do
+not make hosted model calls.

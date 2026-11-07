@@ -24,7 +24,7 @@ docs: docs-sync
 	$(UV) run --group docs sphinx-build -b html $(DOCS_SRC) $(DOCS_OUT)
 
 docs-strict: docs-sync
-	$(UV) run --group docs sphinx-build -W -b html $(DOCS_SRC) $(DOCS_OUT)
+	$(UV) run --group docs sphinx-build -W --keep-going -b html $(DOCS_SRC) $(DOCS_OUT)
 
 docs-serve: docs-sync
 	$(UV) run --group docs sphinx-autobuild $(DOCS_SRC) $(DOCS_OUT) \

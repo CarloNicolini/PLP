@@ -1,6 +1,6 @@
 # Engine Selection
 
-`choose_engine(graph)` chooses an engine from topology.
+`choose_engine(graph)` returns an engine class using the first matching rule below.
 
 | Graph structure | Engine |
 | --- | --- |
@@ -8,7 +8,7 @@
 | cycle in sample parents | `LoopyParticleBP` |
 | acyclic sample graph, no factors | `Forward` |
 | cycle in moralized graph | `LoopyParticleBP` |
-| long chain with unary per-site factors | `SMC` |
+| single directed path of at least three sites, with only unary factors | `SMC` |
 | other acyclic graph with factors | `ImportanceSampling` |
 
 This heuristic is intentionally conservative. You can always instantiate an engine class directly when you know more than the topology reveals.

@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "plp"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Probabilistic Language Programming"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -21,8 +25,22 @@ dependencies = [
     "typer>=0.20.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/CarloNicolini/PLP"
+Repository = "https://github.com/CarloNicolini/PLP"
+Issues = "https://github.com/CarloNicolini/PLP/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["plp*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "plp.__version__"}
+
 [dependency-groups]
 dev = [
+    "build>=1.2.2",
+    "twine>=6.0.0",
     "pytest>=9.0.1",
     "pytest-asyncio>=1.3.0",
 ]

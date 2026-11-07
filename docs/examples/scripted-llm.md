@@ -1,6 +1,6 @@
 # Example: A Scripted LLM
 
-This tiny client is enough to run `sample` without a network. The full runnable file is `examples/scripted_quickstart.py`.
+This tiny client is enough to run `sample` without a network. The [offline quickstart](../getting-started/quickstart.md) shows how to run a complete trace with a scripted client.
 
 ```python
 from types import SimpleNamespace
@@ -18,10 +18,3 @@ class ScriptedLLM:
 ```
 
 Use this pattern in tests and documentation. It gives deterministic traces while preserving the same primitive interface as a real client.
-
-Run it with:
-
-```bash
-source .venv/bin/activate
-python examples/scripted_quickstart.py
-```
